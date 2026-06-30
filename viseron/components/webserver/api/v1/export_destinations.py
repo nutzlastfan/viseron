@@ -92,19 +92,19 @@ class ExportDestinationsAPIHandler(BaseAPIHandler):
             )
         return sorted(response, key=lambda item: item["name"].lower())
 
-    @require_auth([Role.ADMIN, Role.WRITE, Role.READ])
+    @require_auth
     async def get_export_destinations(self) -> None:
         """Get configured export destinations."""
         config = self._load_config()
         destinations = self._as_response(self._destinations_from_config(config))
-        self.response_success(
+        await self.response_success(
             response={
                 "destinations": destinations,
                 "default_destination": DEFAULT_EXPORT_DESTINATION_ID,
             }
         )
 
-    @require_auth([Role.ADMIN])
+    @require_auth
     async def put_export_destinations(self) -> None:
         """Save configured export destinations."""
         destinations = {}
@@ -128,7 +128,7 @@ class ExportDestinationsAPIHandler(BaseAPIHandler):
             )
             return
 
-        self.response_success(
+        await self.response_success(
             response={
                 "saved": True,
                 "destinations": self._as_response(destinations),
