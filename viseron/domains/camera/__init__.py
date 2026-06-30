@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import secrets
+import time
 from abc import abstractmethod
 from collections import deque
 from dataclasses import dataclass
@@ -91,6 +92,7 @@ if TYPE_CHECKING:
 
 
 LOGGER = logging.getLogger(__name__)
+STALE_FRAME_WARNING_SECONDS = 60
 
 
 @dataclass
@@ -219,8 +221,34 @@ class AbstractCamera(AbstractDomain):
         """Post init hook."""
         self._vis.register_domain(DOMAIN, self._identifier, self)
 
-    def as_dict(self) -> dict[str, Any]:
+    def as_dict(self, *, allow_policy_override: bool = False) -> dict[str, Any]:
         """Return camera information as dict."""
+        webserver = self._vis.data.get(WEBSERVER_COMPONENT)
+        if webserver:
+            policy = webserver.camera_policy.camera_status(
+                self.identifier,
+                allow_override=allow_policy_override,
+            )
+        else:
+            policy = {
+                "recording": {
+                    "allowed": True,
+                    "reason": None,
+                    "rule_id": None,
+                    "rule_name": None,
+                    "override_active": False,
+                    "override_until": None,
+                },
+                "live": {
+                    "allowed": True,
+                    "reason": None,
+                    "rule_id": None,
+                    "rule_name": None,
+                    "override_active": False,
+                    "override_until": None,
+                },
+            }
+        status = self._status_dict(policy)
         return {
             "identifier": self.identifier,
             "name": self.name,
@@ -241,6 +269,181 @@ class AbstractCamera(AbstractDomain):
             "connected": self.connected,
             "live_stream_available": self.live_stream_available,
             "is_recording": self.is_recording,
+            "effective_policy": policy,
+            "status": status,
+        }
+
+    def _last_frame_age(self) -> float | None:
+        """Return age of the last frame in seconds."""
+        if not self.current_frame:
+            return None
+        return max(0.0, time.time() - self.current_frame.capture_time)
+
+    def _stale_frame_threshold(self) -> int:
+        """Return seconds before a connected camera is treated as stale."""
+        return STALE_FRAME_WARNING_SECONDS
+
+    def _stale_frame_status(self, last_frame_age: float | None) -> dict[str, Any]:
+        """Return stale-frame status details."""
+        threshold = self._stale_frame_threshold()
+        stale = (
+            self.is_on
+            and self.connected
+            and last_frame_age is not None
+            and last_frame_age > threshold
+        )
+        return {
+            "stale": stale,
+            "threshold": threshold,
+            "age": last_frame_age,
+        }
+
+    def _latest_segment_age(self) -> float | None:
+        """Return age of the latest temporary recording segment."""
+        try:
+            entries = [
+                os.path.join(self.temp_segments_folder, entry)
+                for entry in os.listdir(self.temp_segments_folder)
+                if entry.endswith((".m4s", ".mp4", ".ts", ".m3u8"))
+            ]
+        except OSError:
+            return None
+
+        newest = 0.0
+        for entry in entries:
+            try:
+                newest = max(newest, os.path.getmtime(entry))
+            except OSError:
+                continue
+
+        if not newest:
+            return None
+        return max(0.0, time.time() - newest)
+
+    def _status_dict(self, policy: dict[str, Any]) -> dict[str, Any]:
+        """Return concise camera status for the frontend."""
+        live_policy = policy["live"]
+        recording_policy = policy["recording"]
+        live_blocked = live_policy["allowed"] is False
+        recording_blocked = recording_policy["allowed"] is False
+        last_frame_age = self._last_frame_age()
+        latest_segment_age = self._latest_segment_age()
+        stale_frame = self._stale_frame_status(last_frame_age)
+
+        live_status = {
+            "available": self.live_stream_available,
+            "reachable": self.connected and not live_blocked,
+            "blocked": live_blocked,
+            "reason": live_policy["reason"],
+        }
+        recording_status = {
+            "active": self.is_recording,
+            "blocked": recording_blocked,
+            "reason": recording_policy["reason"],
+            "state": "ready",
+        }
+
+        if not self.is_on:
+            recording_status["state"] = "off"
+            return {
+                "state": "off",
+                "label": "Camera off",
+                "severity": "warning",
+                "detail": "Camera connection is stopped",
+                "live": live_status,
+                "recording": recording_status,
+                "last_frame_age": last_frame_age,
+                "latest_segment_age": latest_segment_age,
+                "stale_frame": stale_frame,
+            }
+
+        if not self.connected:
+            recording_status["state"] = "offline"
+            return {
+                "state": "offline",
+                "label": "Source offline",
+                "severity": "error",
+                "detail": "No frames are currently being received",
+                "live": live_status,
+                "recording": recording_status,
+                "last_frame_age": last_frame_age,
+                "latest_segment_age": latest_segment_age,
+                "stale_frame": stale_frame,
+            }
+
+        if stale_frame["stale"]:
+            recording_status["state"] = (
+                "recording" if self.is_recording else "stale"
+            )
+            return {
+                "state": "stale",
+                "label": "Stale frames",
+                "severity": "warning",
+                "detail": (
+                    "Camera is connected but no fresh frame has been received "
+                    f"for {round(last_frame_age or 0)}s"
+                ),
+                "live": live_status,
+                "recording": recording_status,
+                "last_frame_age": last_frame_age,
+                "latest_segment_age": latest_segment_age,
+                "stale_frame": stale_frame,
+            }
+
+        if live_blocked:
+            recording_status["state"] = (
+                "blocked" if recording_blocked else recording_status["state"]
+            )
+            return {
+                "state": "live_blocked",
+                "label": "Live blocked",
+                "severity": "warning",
+                "detail": live_policy["reason"] or "Live view is blocked",
+                "live": live_status,
+                "recording": recording_status,
+                "last_frame_age": last_frame_age,
+                "latest_segment_age": latest_segment_age,
+                "stale_frame": stale_frame,
+            }
+
+        if self.is_recording:
+            recording_status["state"] = "recording"
+            return {
+                "state": "recording",
+                "label": "Recording",
+                "severity": "success",
+                "detail": None,
+                "live": live_status,
+                "recording": recording_status,
+                "last_frame_age": last_frame_age,
+                "latest_segment_age": latest_segment_age,
+                "stale_frame": stale_frame,
+            }
+
+        if recording_blocked:
+            recording_status["state"] = "blocked"
+            return {
+                "state": "recording_blocked",
+                "label": "Recording blocked",
+                "severity": "warning",
+                "detail": recording_policy["reason"] or "Recording is blocked",
+                "live": live_status,
+                "recording": recording_status,
+                "last_frame_age": last_frame_age,
+                "latest_segment_age": latest_segment_age,
+                "stale_frame": stale_frame,
+            }
+
+        return {
+            "state": "connected",
+            "label": "Connected",
+            "severity": "success",
+            "detail": None,
+            "live": live_status,
+            "recording": recording_status,
+            "last_frame_age": last_frame_age,
+            "latest_segment_age": latest_segment_age,
+            "stale_frame": stale_frame,
         }
 
     def generate_token(self) -> str:
@@ -294,6 +497,14 @@ class AbstractCamera(AbstractDomain):
         if self.is_recording:
             self.stop_recorder()
         self.current_frame = None
+
+    def reconnect_camera(self) -> None:
+        """Reconnect camera streaming."""
+        if self.is_on:
+            self._logger.info("Reconnecting camera")
+            self.stop_camera()
+            time.sleep(1)
+        self.start_camera()
 
     @abstractmethod
     def _stop_camera(self) -> None:
@@ -656,6 +867,31 @@ class FailedCamera:
 
     def as_dict(self) -> dict[str, Any]:
         """Return camera as dict."""
+        status = {
+            "state": "setup_retrying" if self.retrying else "setup_failed",
+            "label": "Retrying setup" if self.retrying else "Failed setup",
+            "severity": "warning" if self.retrying else "error",
+            "detail": self.error,
+            "live": {
+                "available": False,
+                "reachable": False,
+                "blocked": False,
+                "reason": None,
+            },
+            "recording": {
+                "active": False,
+                "blocked": True,
+                "reason": self.error,
+                "state": "failed",
+            },
+            "last_frame_age": None,
+            "latest_segment_age": None,
+            "stale_frame": {
+                "stale": False,
+                "threshold": STALE_FRAME_WARNING_SECONDS,
+                "age": None,
+            },
+        }
         return {
             "name": self.name,
             "identifier": self.identifier,
@@ -665,9 +901,11 @@ class FailedCamera:
                 "width": self.width,
                 "height": self.height,
             },
+            "live_stream_available": False,
             "error": self.error,
             "retrying": self.retrying,
             "failed": True,
+            "status": status,
         }
 
     @property

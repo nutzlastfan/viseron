@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { ZoomPanTransform } from "lib/types";
+
 interface ZoomPanState {
   scale: number;
   translateX: number;
@@ -11,7 +13,216 @@ interface UseZoomPanOptions {
   maxScale?: number;
   zoomSpeed?: number;
   disabled?: boolean;
+  contentAspectRatio?: number;
+  persistedTransform?: ZoomPanTransform;
+  onTransformChange?: (transform: ZoomPanTransform) => void;
 }
+
+const DEFAULT_PERSISTED_TRANSFORM: ZoomPanTransform = {
+  scale: 1,
+  centerX: 0.5,
+  centerY: 0.5,
+};
+
+const clamp = (value: number, min: number, max: number) =>
+  Math.max(min, Math.min(max, value));
+
+const finiteOr = (value: unknown, fallback: number) =>
+  typeof value === "number" && Number.isFinite(value) ? value : fallback;
+
+const getContainedContentRect = (
+  containerWidth: number,
+  containerHeight: number,
+  contentAspectRatio?: number,
+) => {
+  if (
+    !contentAspectRatio ||
+    !Number.isFinite(contentAspectRatio) ||
+    contentAspectRatio <= 0 ||
+    containerWidth === 0 ||
+    containerHeight === 0
+  ) {
+    return undefined;
+  }
+
+  const containerAspectRatio = containerWidth / containerHeight;
+  if (contentAspectRatio >= containerAspectRatio) {
+    const height = containerWidth / contentAspectRatio;
+    return {
+      left: 0,
+      top: (containerHeight - height) / 2,
+      width: containerWidth,
+      height,
+    };
+  }
+
+  const width = containerHeight * contentAspectRatio;
+  return {
+    left: (containerWidth - width) / 2,
+    top: 0,
+    width,
+    height: containerHeight,
+  };
+};
+
+const getBounds = (
+  containerWidth: number,
+  containerHeight: number,
+  scale: number,
+  contentAspectRatio?: number,
+) => {
+  const contentRect = getContainedContentRect(
+    containerWidth,
+    containerHeight,
+    contentAspectRatio,
+  );
+  if (contentRect) {
+    return {
+      minTranslateX: Math.min(
+        -contentRect.left * scale,
+        containerWidth - (contentRect.left + contentRect.width) * scale,
+      ),
+      maxTranslateX: Math.max(
+        -contentRect.left * scale,
+        containerWidth - (contentRect.left + contentRect.width) * scale,
+      ),
+      minTranslateY: Math.min(
+        -contentRect.top * scale,
+        containerHeight - (contentRect.top + contentRect.height) * scale,
+      ),
+      maxTranslateY: Math.max(
+        -contentRect.top * scale,
+        containerHeight - (contentRect.top + contentRect.height) * scale,
+      ),
+    };
+  }
+
+  const contentWidth = containerWidth * scale;
+  const contentHeight = containerHeight * scale;
+
+  return {
+    minTranslateX: Math.min(0, containerWidth - contentWidth),
+    maxTranslateX: 0,
+    minTranslateY: Math.min(0, containerHeight - contentHeight),
+    maxTranslateY: 0,
+  };
+};
+
+const clampTransform = (
+  transform: ZoomPanState,
+  rect: DOMRect,
+  minScale: number,
+  contentAspectRatio?: number,
+): ZoomPanState => {
+  if (transform.scale <= minScale) {
+    return {
+      scale: minScale,
+      translateX: 0,
+      translateY: 0,
+    };
+  }
+
+  const bounds = getBounds(
+    rect.width,
+    rect.height,
+    transform.scale,
+    contentAspectRatio,
+  );
+  return {
+    scale: transform.scale,
+    translateX: clamp(
+      transform.translateX,
+      bounds.minTranslateX,
+      bounds.maxTranslateX,
+    ),
+    translateY: clamp(
+      transform.translateY,
+      bounds.minTranslateY,
+      bounds.maxTranslateY,
+    ),
+  };
+};
+
+const toPersistedTransform = (
+  transform: ZoomPanState,
+  rect: DOMRect,
+  minScale: number,
+  contentAspectRatio?: number,
+): ZoomPanTransform => {
+  if (transform.scale <= minScale || rect.width === 0 || rect.height === 0) {
+    return DEFAULT_PERSISTED_TRANSFORM;
+  }
+
+  const contentRect = getContainedContentRect(
+    rect.width,
+    rect.height,
+    contentAspectRatio,
+  );
+  const centerX = (rect.width / 2 - transform.translateX) / transform.scale;
+  const centerY = (rect.height / 2 - transform.translateY) / transform.scale;
+
+  if (contentRect) {
+    return {
+      scale: transform.scale,
+      centerX: clamp((centerX - contentRect.left) / contentRect.width, 0, 1),
+      centerY: clamp((centerY - contentRect.top) / contentRect.height, 0, 1),
+      viewportAspectRatio: rect.width / rect.height,
+    };
+  }
+
+  return {
+    scale: transform.scale,
+    centerX: clamp(centerX / rect.width, 0, 1),
+    centerY: clamp(centerY / rect.height, 0, 1),
+    viewportAspectRatio: rect.width / rect.height,
+  };
+};
+
+const fromPersistedTransform = (
+  persistedTransform: ZoomPanTransform | undefined,
+  rect: DOMRect,
+  minScale: number,
+  maxScale: number,
+  contentAspectRatio?: number,
+): ZoomPanState => {
+  if (!persistedTransform || rect.width === 0 || rect.height === 0) {
+    return {
+      scale: 1,
+      translateX: 0,
+      translateY: 0,
+    };
+  }
+
+  const scale = clamp(
+    finiteOr(persistedTransform.scale, 1),
+    minScale,
+    maxScale,
+  );
+  const centerX = clamp(finiteOr(persistedTransform.centerX, 0.5), 0, 1);
+  const centerY = clamp(finiteOr(persistedTransform.centerY, 0.5), 0, 1);
+  const contentRect =
+    persistedTransform.viewportAspectRatio === undefined
+      ? undefined
+      : getContainedContentRect(rect.width, rect.height, contentAspectRatio);
+
+  const centerPixelX = contentRect
+    ? contentRect.left + centerX * contentRect.width
+    : centerX * rect.width;
+  const centerPixelY = contentRect
+    ? contentRect.top + centerY * contentRect.height
+    : centerY * rect.height;
+
+  return clampTransform(
+    {
+      scale,
+      translateX: rect.width / 2 - centerPixelX * scale,
+      translateY: rect.height / 2 - centerPixelY * scale,
+    },
+    rect,
+    minScale,
+    contentAspectRatio,
+  );
+};
 
 export const useZoomPan = (
   containerRef: React.RefObject<HTMLElement | HTMLDivElement | null>,
@@ -22,6 +233,9 @@ export const useZoomPan = (
     maxScale = 5, // Can be adjusted as needed
     zoomSpeed = 0.1,
     disabled = false,
+    contentAspectRatio,
+    persistedTransform,
+    onTransformChange,
   } = options;
 
   const [transform, setTransform] = useState<ZoomPanState>({
@@ -36,6 +250,39 @@ export const useZoomPan = (
 
   const transformRef = useRef(transform);
   transformRef.current = transform;
+  const onTransformChangeRef = useRef(onTransformChange);
+  onTransformChangeRef.current = onTransformChange;
+  const persistedTransformRef = useRef<ZoomPanTransform>(
+    persistedTransform ?? DEFAULT_PERSISTED_TRANSFORM,
+  );
+
+  const saveTransform = useCallback(
+    (newTransform: ZoomPanState, rect: DOMRect) => {
+      const newPersistedTransform = toPersistedTransform(
+        newTransform,
+        rect,
+        minScale,
+        contentAspectRatio,
+      );
+      persistedTransformRef.current = newPersistedTransform;
+      onTransformChangeRef.current?.(newPersistedTransform);
+    },
+    [contentAspectRatio, minScale],
+  );
+
+  const applyTransform = useCallback(
+    (newTransform: ZoomPanState, rect: DOMRect) => {
+      const clampedTransform = clampTransform(
+        newTransform,
+        rect,
+        minScale,
+        contentAspectRatio,
+      );
+      setTransform(clampedTransform);
+      saveTransform(clampedTransform, rect);
+    },
+    [contentAspectRatio, minScale, saveTransform],
+  );
 
   const handleWheel = useCallback(
     (event: Event) => {
@@ -67,46 +314,27 @@ export const useZoomPan = (
 
       // If scale is back to minimum (1.0), reset position to center
       if (newScale === minScale) {
-        setTransform({
-          scale: newScale,
-          translateX: 0,
-          translateY: 0,
-        });
+        applyTransform(
+          {
+            scale: newScale,
+            translateX: 0,
+            translateY: 0,
+          },
+          rect,
+        );
       } else {
         // Calculate new translation to keep zoom center at mouse position
-        let newTranslateX = mouseX - zoomCenterX * newScale;
-        let newTranslateY = mouseY - zoomCenterY * newScale;
-
-        // Apply boundary constraints
-        const containerWidth = rect.width;
-        const containerHeight = rect.height;
-        const contentWidth = containerWidth * newScale;
-        const contentHeight = containerHeight * newScale;
-
-        // Calculate bounds
-        const minTranslateX = Math.min(0, containerWidth - contentWidth);
-        const maxTranslateX = Math.max(0, containerWidth - contentWidth);
-        const minTranslateY = Math.min(0, containerHeight - contentHeight);
-        const maxTranslateY = Math.max(0, containerHeight - contentHeight);
-
-        // Clamp translate values
-        newTranslateX = Math.max(
-          minTranslateX,
-          Math.min(maxTranslateX, newTranslateX),
+        applyTransform(
+          {
+            scale: newScale,
+            translateX: mouseX - zoomCenterX * newScale,
+            translateY: mouseY - zoomCenterY * newScale,
+          },
+          rect,
         );
-        newTranslateY = Math.max(
-          minTranslateY,
-          Math.min(maxTranslateY, newTranslateY),
-        );
-
-        setTransform({
-          scale: newScale,
-          translateX: newTranslateX,
-          translateY: newTranslateY,
-        });
       }
     },
-    [containerRef, minScale, maxScale, zoomSpeed, disabled],
+    [containerRef, minScale, maxScale, zoomSpeed, disabled, applyTransform],
   );
 
   const handleMouseDown = useCallback(
@@ -147,38 +375,18 @@ export const useZoomPan = (
       const newTranslateX = dragStartTransform.x + deltaX;
       const newTranslateY = dragStartTransform.y + deltaY;
 
-      // Get container dimensions
       const containerRect = container.getBoundingClientRect();
-      const containerWidth = containerRect.width;
-      const containerHeight = containerRect.height;
 
-      // Calculate content dimensions when scaled
-      const contentWidth = containerWidth * transformRef.current.scale;
-      const contentHeight = containerHeight * transformRef.current.scale;
-
-      // Calculate bounds to keep content within container
-      const minTranslateX = Math.min(0, containerWidth - contentWidth);
-      const maxTranslateX = Math.max(0, containerWidth - contentWidth);
-      const minTranslateY = Math.min(0, containerHeight - contentHeight);
-      const maxTranslateY = Math.max(0, containerHeight - contentHeight);
-
-      // Clamp translate values to stay within bounds
-      const clampedTranslateX = Math.max(
-        minTranslateX,
-        Math.min(maxTranslateX, newTranslateX),
+      applyTransform(
+        {
+          scale: transformRef.current.scale,
+          translateX: newTranslateX,
+          translateY: newTranslateY,
+        },
+        containerRect,
       );
-      const clampedTranslateY = Math.max(
-        minTranslateY,
-        Math.min(maxTranslateY, newTranslateY),
-      );
-
-      setTransform((prev) => ({
-        ...prev,
-        translateX: clampedTranslateX,
-        translateY: clampedTranslateY,
-      }));
     },
-    [isDragging, dragStart, dragStartTransform, containerRef],
+    [isDragging, dragStart, dragStartTransform, containerRef, applyTransform],
   );
 
   const handleMouseUp = useCallback(() => {
@@ -187,12 +395,60 @@ export const useZoomPan = (
 
   const resetTransform = useCallback(() => {
     if (disabled) return; // Don't reset when disabled
-    setTransform({
-      scale: 1,
-      translateX: 0,
-      translateY: 0,
+    const container = containerRef.current;
+    if (!container) return;
+
+    applyTransform(
+      {
+        scale: 1,
+        translateX: 0,
+        translateY: 0,
+      },
+      container.getBoundingClientRect(),
+    );
+  }, [applyTransform, containerRef, disabled]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) {
+      return;
+    }
+
+    setTransform(
+      fromPersistedTransform(
+        persistedTransform,
+        container.getBoundingClientRect(),
+        minScale,
+        maxScale,
+        contentAspectRatio,
+      ),
+    );
+    persistedTransformRef.current =
+      persistedTransform ?? DEFAULT_PERSISTED_TRANSFORM;
+  }, [containerRef, contentAspectRatio, maxScale, minScale, persistedTransform]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || typeof ResizeObserver === "undefined") {
+      return undefined;
+    }
+
+    const resizeObserver = new ResizeObserver(() => {
+      const rect = container.getBoundingClientRect();
+      setTransform(
+        fromPersistedTransform(
+          persistedTransformRef.current,
+          rect,
+          minScale,
+          maxScale,
+          contentAspectRatio,
+        ),
+      );
     });
-  }, [disabled]);
+    resizeObserver.observe(container);
+
+    return () => resizeObserver.disconnect();
+  }, [containerRef, contentAspectRatio, maxScale, minScale]);
 
   // Add event listeners
   useEffect(() => {

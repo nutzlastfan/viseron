@@ -7,6 +7,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { CameraNameOverlay } from "components/camera/CameraNameOverlay";
 import { CustomControls } from "components/player/CustomControls.js";
 import { ZoomPanOverlay } from "components/player/ZoomPanOverlay";
+import { usePersistedZoomPan } from "components/player/hooks/usePersistedZoomPan";
 import { useZoomPan } from "components/player/hooks/useZoomPan";
 import { useMjpegPlayerControls } from "components/player/mjpegplayer/useMjpegPlayerControls";
 import { useCanHover } from "lib/hooks/useCanHover";
@@ -125,6 +126,9 @@ export function MjpegPlayer({
   const canHover = useCanHover();
   const imgRef = useRef<HTMLImageElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const { persistedTransform, onTransformChange } = usePersistedZoomPan(
+    camera.identifier,
+  );
 
   const {
     controlsVisible,
@@ -141,12 +145,19 @@ export function MjpegPlayer({
     handleManualRecording,
     manualRecordingLoading,
   } = useMjpegPlayerControls(containerRef, camera, onPlayerFullscreenChange);
+  const livePolicy = !camera.failed ? camera.effective_policy?.live : undefined;
+  const recordingPolicy = !camera.failed
+    ? camera.effective_policy?.recording
+    : undefined;
+  const liveBlocked = livePolicy?.allowed === false;
+  const recordingBlocked = recordingPolicy?.allowed === false;
 
   const { error, isLoading } = useMjpegErrorHandling(imgRef, src);
 
   // Disable zoom/pan when loading, camera is disconnected and still loading or has error
   const isZoomPanDisabled: boolean = Boolean(
     isLoading ||
+      liveBlocked ||
       (!camera.failed && !(camera as types.Camera).connected) ||
       !!error,
   );
@@ -164,6 +175,8 @@ export function MjpegPlayer({
     maxScale: 5,
     zoomSpeed: 0.2,
     disabled: isZoomPanDisabled,
+    persistedTransform,
+    onTransformChange,
   });
 
   return (
@@ -212,7 +225,9 @@ export function MjpegPlayer({
         onFullscreenToggle={handleFullscreenToggle}
         onPictureInPictureToggle={handlePictureInPictureToggle}
         isPictureInPictureSupported={isPictureInPictureSupported}
-        onManualRecording={camera.failed ? undefined : handleManualRecording}
+        onManualRecording={
+          camera.failed || recordingBlocked ? undefined : handleManualRecording
+        }
         isRecording={camera.failed ? undefined : camera.is_recording}
         manualRecordingLoading={manualRecordingLoading}
         extraButtons={extraButtons}
@@ -229,7 +244,45 @@ export function MjpegPlayer({
         }}
       >
         {/* Show placeholder when camera is disconnected (but NOT when in PiP mode) */}
+        {!camera.failed && liveBlocked && !isPictureInPicture && (
+          <Box
+            sx={{
+              width: "100%",
+              height: "100%",
+              backgroundColor: theme.palette.background.default,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              minHeight: 200,
+              gap: 2,
+              px: 2,
+            }}
+          >
+            <VideoOff
+              size={48}
+              style={{
+                color: theme.palette.text.secondary,
+                opacity: 0.5,
+              }}
+            />
+            <Box
+              sx={{
+                color: theme.palette.text.secondary,
+                textAlign: "center",
+                fontSize: "0.875rem",
+                opacity: 0.85,
+                maxWidth: "80%",
+                wordBreak: "break-word",
+              }}
+            >
+              {livePolicy?.reason || "Live view is blocked by schedule"}
+            </Box>
+          </Box>
+        )}
+
         {!camera.failed &&
+          !liveBlocked &&
           !(camera as types.Camera).connected &&
           !isPictureInPicture && (
             <Box
@@ -273,21 +326,25 @@ export function MjpegPlayer({
         {/* Always render img element, but hide it visually when camera is disconnected */}
         <img
           ref={imgRef}
-          src={(() => {
-            let url = src;
-            const params = [];
-            if (drawObjects) params.push("draw_objects=1");
-            if (drawMotion) params.push("draw_motion=1");
-            if (drawObjectMask) params.push("draw_object_mask=1");
-            if (drawMotionMask) params.push("draw_motion_mask=1");
-            if (drawZones) params.push("draw_zones=1");
-            if (drawPostProcessorMask)
-              params.push("draw_post_processor_mask=1");
-            if (params.length) {
-              url += (url.includes("?") ? "&" : "?") + params.join("&");
-            }
-            return url;
-          })()}
+          src={
+            liveBlocked
+              ? ""
+              : (() => {
+                  let url = src;
+                  const params = [];
+                  if (drawObjects) params.push("draw_objects=1");
+                  if (drawMotion) params.push("draw_motion=1");
+                  if (drawObjectMask) params.push("draw_object_mask=1");
+                  if (drawMotionMask) params.push("draw_motion_mask=1");
+                  if (drawZones) params.push("draw_zones=1");
+                  if (drawPostProcessorMask)
+                    params.push("draw_post_processor_mask=1");
+                  if (params.length) {
+                    url += (url.includes("?") ? "&" : "?") + params.join("&");
+                  }
+                  return url;
+                })()
+          }
           alt="MJPEG Stream"
           style={{
             width: "100%",
@@ -300,7 +357,8 @@ export function MjpegPlayer({
             transition: "transform 0.3s ease-in-out",
             // Hide img element when camera is disconnected (but keep it in DOM)
             display:
-              !camera.failed && !(camera as types.Camera).connected
+              (!camera.failed && liveBlocked) ||
+              (!camera.failed && !(camera as types.Camera).connected)
                 ? "none"
                 : "block",
           }}

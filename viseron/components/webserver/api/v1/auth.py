@@ -18,6 +18,7 @@ from viseron.components.webserver.auth import (
     UserExistsError,
     token_response,
 )
+from viseron.components.webserver.const import CAMERA_PERMISSION_VIEW_LIVE
 
 LOGGER = logging.getLogger(__name__)
 
@@ -122,6 +123,7 @@ class AuthAPIHandler(BaseAPIHandler):
                     vol.Required("username"): str,
                     vol.Required("role"): vol.In([e.value for e in Role]),
                     vol.Required("assigned_cameras"): vol.Maybe(list),
+                    vol.Optional("assigned_feeders", default=None): vol.Maybe(list),
                 }
             ),
         },
@@ -389,6 +391,7 @@ class AuthAPIHandler(BaseAPIHandler):
                 self.json_body["username"],
                 Role(self.json_body["role"]),
                 self.json_body["assigned_cameras"],
+                self.json_body["assigned_feeders"],
             )
         except UserDoesNotExistError as error:
             self.response_error(HTTPStatus.NOT_FOUND, reason=str(error))
@@ -415,4 +418,23 @@ class AuthAPIHandler(BaseAPIHandler):
 
     async def auth_request_camera_token(self, camera_identifier: str) -> None:
         """Auth request endpoint for NGINX using camera token."""
+        if not self.has_camera_permission(camera_identifier, CAMERA_PERMISSION_VIEW_LIVE):
+            self.response_error(
+                HTTPStatus.FORBIDDEN,
+                reason="Missing live view permission",
+            )
+            return
+
+        decision = self._webserver.camera_policy.decision(
+            camera_identifier,
+            "live",
+            allow_override=True,
+        )
+        if not decision.allowed:
+            self.response_error(
+                HTTPStatus.FORBIDDEN,
+                reason=decision.reason or "Live view blocked by schedule",
+            )
+            return
+
         await self.response_success(response={"camera_identifier": camera_identifier})

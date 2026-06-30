@@ -3,6 +3,7 @@ import { lazy } from "react";
 import { Navigate, useRoutes } from "react-router-dom";
 
 const Cameras = lazy(() => import("pages/Cameras"));
+const CamerasSettings = lazy(() => import("pages/settings/Cameras"));
 const Tuning = lazy(() => import("pages/Tuning"));
 const CameraRecordings = lazy(
   () => import("pages/recordings/CameraRecordings"),
@@ -13,6 +14,7 @@ const CameraRecordingsDaily = lazy(
 const Configuration = lazy(() => import("pages/Configuration"));
 const Entities = lazy(() => import("pages/Entities"));
 const Events = lazy(() => import("pages/Events"));
+const Feeders = lazy(() => import("pages/Feeders"));
 const Login = lazy(() => import("pages/Login"));
 const Live = lazy(() => import("pages/Live"));
 const NotFound = lazy(() => import("pages/NotFound"));
@@ -22,6 +24,14 @@ const PublicLayout = lazy(() => import("layouts/PublicLayout"));
 const Recordings = lazy(() => import("pages/recordings/Recordings"));
 const Settings = lazy(() => import("pages/settings"));
 const SystemEvents = lazy(() => import("pages/settings/SystemEvents"));
+const SystemHealth = lazy(() => import("pages/settings/SystemHealth"));
+const IMouseControl = lazy(() => import("pages/settings/IMouseControl"));
+const CameraAccess = lazy(() => import("pages/settings/CameraAccess"));
+const ExportDestinations = lazy(
+  () => import("pages/settings/ExportDestinations"),
+);
+const RecordingSchedule = lazy(() => import("pages/settings/RecordingSchedule"));
+const LDAP = lazy(() => import("pages/settings/LDAP"));
 const Users = lazy(() => import("pages/settings/Users"));
 const TemplateEditor = lazy(() => import("pages/settings/TemplateEditor"));
 
@@ -78,8 +88,21 @@ function App() {
           element: <Entities />,
         },
         {
+          path: "/feeders",
+          element: <Feeders />,
+        },
+        {
           path: "/profile",
           element: <Profile />,
+        },
+        {
+          element: <RequireRole userRole={["admin", "write"]} />,
+          children: [
+            {
+              path: "/settings/recording-schedule",
+              element: <RecordingSchedule />,
+            },
+          ],
         },
         {
           element: <RequireRole userRole={["admin"]} />,
@@ -93,12 +116,40 @@ function App() {
                   element: <Configuration />,
                 },
                 {
+                  path: "/settings/cameras",
+                  element: <CamerasSettings />,
+                },
+                {
                   path: "/settings/users",
                   element: <Users />,
                 },
                 {
+                  path: "/settings/ldap",
+                  element: <LDAP />,
+                },
+                {
+                  path: "/settings/camera-access",
+                  element: <CameraAccess />,
+                },
+                {
+                  path: "/settings/export-destinations",
+                  element: <ExportDestinations />,
+                },
+                {
+                  path: "/settings/camera-policies",
+                  element: <Navigate to="/settings/recording-schedule" replace />,
+                },
+                {
                   path: "/settings/system-events",
                   element: <SystemEvents />,
+                },
+                {
+                  path: "/settings/system-health",
+                  element: <SystemHealth />,
+                },
+                {
+                  path: "/settings/imouse",
+                  element: <IMouseControl />,
                 },
                 {
                   path: "/settings/template-editor",

@@ -6,6 +6,34 @@ import * as types from "lib/types";
 
 export const API_BASE_URL = "/api/v1";
 
+function cameraStatus(isRecording = false): types.CameraRuntimeStatus {
+  return {
+    state: isRecording ? "recording" : "connected",
+    label: isRecording ? "Recording" : "Connected",
+    severity: "success",
+    detail: null,
+    live: {
+      available: true,
+      reachable: true,
+      blocked: false,
+      reason: null,
+    },
+    recording: {
+      active: isRecording,
+      blocked: false,
+      reason: null,
+      state: isRecording ? "recording" : "ready",
+    },
+    last_frame_age: 0,
+    latest_segment_age: 0,
+    stale_frame: {
+      stale: false,
+      threshold: 60,
+      age: 0,
+    },
+  };
+}
+
 export const handlers = [
   http.get(`${API_BASE_URL}/auth/enabled`, () =>
     HttpResponse.json(
@@ -38,6 +66,7 @@ export const handlers = [
         role: "admin",
         assigned_cameras: null,
         preferences: null,
+        auth_provider: "local",
       } as types.AuthUserResponse,
       { status: 200 },
     ),
@@ -82,6 +111,7 @@ export const handlers = [
         live_stream_available: true,
         connected: true,
         is_recording: false,
+        status: cameraStatus(),
       },
       camera2: {
         identifier: "camera2",
@@ -104,6 +134,7 @@ export const handlers = [
         live_stream_available: true,
         connected: true,
         is_recording: true,
+        status: cameraStatus(true),
       },
       camera3: {
         identifier: "camera3",
@@ -126,6 +157,7 @@ export const handlers = [
         live_stream_available: true,
         connected: true,
         is_recording: false,
+        status: cameraStatus(),
       },
     };
     return HttpResponse.json(cameras, { status: 200 });
@@ -156,6 +188,7 @@ export const handlers = [
       live_stream_available: true,
       connected: true,
       is_recording: false,
+      status: cameraStatus(),
     };
     return HttpResponse.json(camera, { status: 200 });
   }),
@@ -181,6 +214,7 @@ export const handlers = [
       live_stream_available: true,
       connected: true,
       is_recording: true,
+      status: cameraStatus(true),
     };
     return HttpResponse.json(camera, { status: 200 });
   }),
@@ -206,6 +240,7 @@ export const handlers = [
       live_stream_available: true,
       connected: true,
       is_recording: false,
+      status: cameraStatus(),
     };
     return HttpResponse.json(camera, { status: 200 });
   }),

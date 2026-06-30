@@ -8,6 +8,10 @@ from typing import cast
 import voluptuous as vol
 
 from viseron.components.webserver.api.handlers import BaseAPIHandler
+from viseron.components.webserver.const import (
+    CAMERA_PERMISSION_DELETE_RECORDINGS,
+    CAMERA_PERMISSION_VIEW_RECORDINGS,
+)
 from viseron.helpers.validators import request_argument_bool, request_argument_no_value
 
 LOGGER = logging.getLogger(__name__)
@@ -134,12 +138,18 @@ class RecordingsAPIHandler(BaseAPIHandler):
 
     async def get_recordings(self) -> None:
         """Get recordings for all cameras."""
-        cameras = self._get_cameras()
+        cameras = {
+            camera_identifier: camera
+            for camera_identifier, camera in (self._get_cameras() or {}).items()
+            if self.has_camera_permission(
+                camera_identifier, CAMERA_PERMISSION_VIEW_RECORDINGS
+            )
+        }
 
         if not cameras:
             self.response_error(
-                HTTPStatus.NOT_FOUND,
-                reason="No cameras found",
+                HTTPStatus.FORBIDDEN,
+                reason="No cameras with recording view permission found",
             )
             return
 
@@ -177,6 +187,14 @@ class RecordingsAPIHandler(BaseAPIHandler):
             self.response_error(
                 HTTPStatus.NOT_FOUND,
                 reason=f"Camera {camera_identifier} not found",
+            )
+            return
+        if not self.has_camera_permission(
+            camera_identifier, CAMERA_PERMISSION_VIEW_RECORDINGS
+        ):
+            self.response_error(
+                HTTPStatus.FORBIDDEN,
+                reason="Missing recording view permission",
             )
             return
 
@@ -221,6 +239,14 @@ class RecordingsAPIHandler(BaseAPIHandler):
             self.response_error(
                 HTTPStatus.NOT_FOUND,
                 reason=f"Camera {camera_identifier} not found",
+            )
+            return
+        if not self.has_camera_permission(
+            camera_identifier, CAMERA_PERMISSION_DELETE_RECORDINGS
+        ):
+            self.response_error(
+                HTTPStatus.FORBIDDEN,
+                reason="Missing recording delete permission",
             )
             return
 

@@ -6,6 +6,7 @@ import {
   DialogContent,
   DialogTitle,
   FormControl,
+  FormControlLabel,
   InputLabel,
   ListItemText,
   MenuItem,
@@ -19,9 +20,13 @@ import ChangePasswordDialog from "components/settings/user/ChangePasswordDialog"
 import { useAuthContext } from "context/AuthContext";
 import { useAuthDelete, useAuthUpdateUser } from "lib/api/auth";
 import { useCamerasAll } from "lib/api/cameras";
+import { useFeeders } from "lib/api/feeders";
 import * as types from "lib/types";
 
-const CAMERA_SELECT_LABEL = "Cameras - Empty gives access to all cameras";
+const CAMERA_SELECT_LABEL = "Cameras";
+const FEEDER_SELECT_LABEL = "Feeders";
+const SELECT_ALL_CAMERAS = "<select-all-cameras>";
+const SELECT_ALL_FEEDERS = "<select-all-feeders>";
 
 interface UserDialogProps {
   user: types.AuthUserResponse;
@@ -33,14 +38,21 @@ function UserDialog({ user, onClose }: UserDialogProps) {
   const authUpdateUser = useAuthUpdateUser();
   const authDelete = useAuthDelete();
   const camerasAll = useCamerasAll();
+  const feeders = useFeeders();
 
   const [name, setName] = useState(user.name);
   const [username, setUsername] = useState(user.username);
   const [role, setRole] = useState(user.role);
+  const [allCameras, setAllCameras] = useState(user.assigned_cameras === null);
   const [assignedCameras, setAssignedCameras] = useState(
     user.assigned_cameras || [],
   );
+  const [allFeeders, setAllFeeders] = useState(user.assigned_feeders === null);
+  const [assignedFeeders, setAssignedFeeders] = useState(
+    user.assigned_feeders || [],
+  );
   const [isChangePasswordOpen, setIsChangePasswordOpen] = useState(false);
+  const feederList = feeders.data?.feeders || [];
 
   const handleSave = () => {
     authUpdateUser.mutate(
@@ -49,8 +61,10 @@ function UserDialog({ user, onClose }: UserDialogProps) {
         name,
         username,
         role,
-        assigned_cameras: assignedCameras,
+        assigned_cameras: allCameras ? null : assignedCameras,
+        assigned_feeders: allFeeders ? null : assignedFeeders,
         preferences: user.preferences,
+        auth_provider: user.auth_provider,
       },
       {
         onSuccess: () => {
@@ -77,22 +91,46 @@ function UserDialog({ user, onClose }: UserDialogProps) {
   };
 
   const handleCameraChange = (event: SelectChangeEvent<string[]>) => {
+    const value =
+      typeof event.target.value === "string"
+        ? event.target.value.split(",")
+        : event.target.value;
     if (
-      event.target.value.includes("<select-all-cameras>") &&
+      value.includes(SELECT_ALL_CAMERAS) &&
       assignedCameras.length === Object.keys(camerasAll.combinedData).length
     ) {
       setAssignedCameras([]);
       return;
     }
 
-    if (event.target.value.includes("<select-all-cameras>")) {
+    if (value.includes(SELECT_ALL_CAMERAS)) {
       const allCameraIds = Object.values(camerasAll.combinedData).map(
         (camera) => camera.identifier,
       );
       setAssignedCameras(allCameraIds);
       return;
     }
-    setAssignedCameras(event.target.value as string[]);
+    setAssignedCameras(value);
+  };
+
+  const handleFeederChange = (event: SelectChangeEvent<string[]>) => {
+    const value =
+      typeof event.target.value === "string"
+        ? event.target.value.split(",")
+        : event.target.value;
+    if (
+      value.includes(SELECT_ALL_FEEDERS) &&
+      assignedFeeders.length === feederList.length
+    ) {
+      setAssignedFeeders([]);
+      return;
+    }
+
+    if (value.includes(SELECT_ALL_FEEDERS)) {
+      setAssignedFeeders(feederList.map((feeder) => feeder.id));
+      return;
+    }
+    setAssignedFeeders(value);
   };
 
   return (
@@ -129,6 +167,17 @@ function UserDialog({ user, onClose }: UserDialogProps) {
             </Select>
           </FormControl>
           <FormControl fullWidth margin="dense">
+            <FormControlLabel
+              control={
+                <Checkbox
+                  checked={allCameras}
+                  onChange={(event) => setAllCameras(event.target.checked)}
+                />
+              }
+              label="All cameras"
+            />
+          </FormControl>
+          <FormControl fullWidth margin="dense" disabled={allCameras}>
             <InputLabel>{CAMERA_SELECT_LABEL}</InputLabel>
             <Select
               multiple
@@ -144,7 +193,7 @@ function UserDialog({ user, onClose }: UserDialogProps) {
                   .join(", ")
               }
             >
-              <MenuItem value="<select-all-cameras>">
+              <MenuItem value={SELECT_ALL_CAMERAS}>
                 <Checkbox
                   checked={
                     assignedCameras.length ===
@@ -159,6 +208,54 @@ function UserDialog({ user, onClose }: UserDialogProps) {
                     checked={assignedCameras.includes(camera.identifier)}
                   />
                   <ListItemText primary={camera.name} />
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          <FormControl fullWidth margin="dense">
+            <FormControlLabel
+              control={
+                <Checkbox
+                  checked={allFeeders}
+                  onChange={(event) => setAllFeeders(event.target.checked)}
+                />
+              }
+              label="All feeders"
+            />
+          </FormControl>
+          <FormControl fullWidth margin="dense" disabled={allFeeders}>
+            <InputLabel>{FEEDER_SELECT_LABEL}</InputLabel>
+            <Select
+              multiple
+              label={FEEDER_SELECT_LABEL}
+              value={assignedFeeders}
+              onChange={handleFeederChange}
+              renderValue={(selected) =>
+                (selected as string[])
+                  .map(
+                    (feederId) =>
+                      feederList.find((feeder) => feeder.id === feederId)
+                        ?.name || feederId,
+                  )
+                  .join(", ")
+              }
+            >
+              <MenuItem value={SELECT_ALL_FEEDERS}>
+                <Checkbox
+                  checked={
+                    assignedFeeders.length === feederList.length &&
+                    feederList.length > 0
+                  }
+                />
+                <ListItemText primary="Select all feeders" />
+              </MenuItem>
+              {feederList.map((feeder) => (
+                <MenuItem key={feeder.id} value={feeder.id}>
+                  <Checkbox checked={assignedFeeders.includes(feeder.id)} />
+                  <ListItemText
+                    primary={feeder.name}
+                    secondary={feeder.available ? feeder.id : "Offline"}
+                  />
                 </MenuItem>
               ))}
             </Select>

@@ -39,6 +39,31 @@ const mockCamera: types.Camera = {
   connected: true,
   live_stream_available: true,
   is_recording: false,
+  status: {
+    state: "connected",
+    label: "Connected",
+    severity: "success",
+    detail: null,
+    live: {
+      available: true,
+      reachable: true,
+      blocked: false,
+      reason: null,
+    },
+    recording: {
+      active: false,
+      blocked: false,
+      reason: null,
+      state: "ready",
+    },
+    last_frame_age: 0,
+    latest_segment_age: 0,
+    stale_frame: {
+      stale: false,
+      threshold: 60,
+      age: 0,
+    },
+  },
 };
 
 describe("sortObj", () => {

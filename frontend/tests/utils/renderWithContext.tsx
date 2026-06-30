@@ -40,7 +40,9 @@ const defaultUser: types.AuthUserResponse = {
   username: "",
   role: "admin",
   assigned_cameras: null,
+  assigned_feeders: null,
   preferences: null,
+  auth_provider: "local",
 };
 
 export function createProvidersWrapper(options: TestContextOptions = {}) {

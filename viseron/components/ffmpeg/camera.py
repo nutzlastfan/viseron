@@ -6,6 +6,7 @@ import contextlib
 import multiprocessing as mp
 import os
 import signal
+import socket
 import time
 from queue import Empty, Full
 from typing import TYPE_CHECKING, Any
@@ -144,6 +145,12 @@ if TYPE_CHECKING:
     from viseron.components.nvr.nvr import FrameIntervalCalculator
     from viseron.components.storage.models import TriggerTypes
     from viseron.domains.object_detector.detected_object import DetectedObject
+
+
+FRAME_PIPE_RESTART_BASE_DELAY = 5
+FRAME_PIPE_RESTART_MAX_DELAY = 300
+FRAME_PIPE_RESTART_PROBE_INTERVAL = 5
+FRAME_PIPE_RESTART_PROBE_TIMEOUT = 2
 
 
 def get_default_hwaccel_args() -> list[str]:
@@ -352,6 +359,7 @@ class Camera(AbstractCamera):
         ] = mp.Queue(maxsize=2)
         self._capture_frames = mp.Event()
         self._thread_stuck = False
+        self._backing_off = mp.Event()
         self.resolution = self.stream.width, self.stream.height
         self.decode_error = mp.Event()
 
@@ -427,23 +435,35 @@ class Camera(AbstractCamera):
         """Read frames from camera."""
         setproctitle.setproctitle("viseron.camera." + self.identifier + ".read_frames")
         self.decode_error.clear()
+        self._backing_off.clear()
         empty_frames = 0
+        consecutive_decode_errors = 0
         self._thread_stuck = False
 
         self.stream.start_pipe()
 
         while self._capture_frames.is_set():
             if self.decode_error.is_set():
-                time.sleep(5)
-                self._logger.error("Restarting frame pipe")
+                restart_delay = min(
+                    FRAME_PIPE_RESTART_BASE_DELAY * (2**consecutive_decode_errors),
+                    FRAME_PIPE_RESTART_MAX_DELAY,
+                )
+                self._logger.error(
+                    "Restarting frame pipe in %s seconds", restart_delay
+                )
+                self._backing_off.set()
+                self._wait_before_pipe_restart(restart_delay)
+                self._backing_off.clear()
                 self.stream.close_pipe()
                 self.stream.start_pipe()
                 self.decode_error.clear()
                 empty_frames = 0
+                consecutive_decode_errors += 1
 
             frame_bytes = self.stream.read()
             if frame_bytes:
                 empty_frames = 0
+                consecutive_decode_errors = 0
                 # Dont queue frames if consumer is not ready
                 with contextlib.suppress(Full):
                     frame_queue.put_nowait(frame_bytes)
@@ -463,9 +483,46 @@ class Camera(AbstractCamera):
                 self.decode_error.set()
 
         self.stream.close_pipe()
+        self._backing_off.clear()
         self._frame_queue.close()
         self._logger.debug("Frame reader stopped")
         os.kill(os.getpid(), signal.SIGKILL)
+
+    def _wait_before_pipe_restart(self, restart_delay: int) -> None:
+        """Wait before restarting FFmpeg, but resume early when the camera is back."""
+        waited = 0
+        host = self._config[CONFIG_HOST]
+        port = self._config[CONFIG_PORT]
+        was_reachable = self._camera_port_reachable(host, port)
+
+        while self._capture_frames.is_set() and waited < restart_delay:
+            sleep_time = min(
+                FRAME_PIPE_RESTART_PROBE_INTERVAL, restart_delay - waited
+            )
+            time.sleep(sleep_time)
+            waited += sleep_time
+
+            if (
+                not was_reachable
+                and self._camera_port_reachable(host, port)
+            ):
+                self._logger.info(
+                    "Camera port reachable after %s seconds, "
+                    "restarting frame pipe now",
+                    waited,
+                )
+                return
+
+    @staticmethod
+    def _camera_port_reachable(host: str, port: int) -> bool:
+        """Return if the camera TCP port is reachable."""
+        try:
+            with socket.create_connection(
+                (host, port), timeout=FRAME_PIPE_RESTART_PROBE_TIMEOUT
+            ):
+                return True
+        except OSError:
+            return False
 
     def relay_frame(self) -> None:
         """Read from the frame queue and create a SharedFrame."""
@@ -521,6 +578,14 @@ class Camera(AbstractCamera):
         """Return true on frame timeout for RestartableThread to trigger a restart."""
         now = utcnow().timestamp()
 
+        if self.decode_error.is_set():
+            self._poll_timer = now
+            return False
+
+        if self._backing_off.is_set():
+            self._poll_timer = now
+            return False
+
         # Make sure we timeout at some point if we never get the first frame.
         if now - self._poll_timer > (DEFAULT_FRAME_TIMEOUT * 2):
             return True
@@ -529,6 +594,10 @@ class Camera(AbstractCamera):
             return False
 
         return now - self._poll_timer > self._config[CONFIG_FRAME_TIMEOUT]
+
+    def _stale_frame_threshold(self) -> int:
+        """Return seconds before this camera is treated as stale."""
+        return max(60, self._config[CONFIG_FRAME_TIMEOUT] * 3)
 
     def calculate_output_fps(self, scanners: list[FrameIntervalCalculator]) -> None:
         """Calculate the camera output fps based on registered frame scanners.

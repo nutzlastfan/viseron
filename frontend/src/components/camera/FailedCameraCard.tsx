@@ -4,6 +4,8 @@ import CardActionArea from "@mui/material/CardActionArea";
 import CardActions from "@mui/material/CardActions";
 import CardContent from "@mui/material/CardContent";
 import CardMedia from "@mui/material/CardMedia";
+import Chip from "@mui/material/Chip";
+import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
 import { useTheme } from "@mui/material/styles";
 
@@ -50,18 +52,16 @@ export function FailedCameraCard({
         sx={onClick ? null : { pointerEvents: "none" }}
       >
         <CardContent>
-          <Typography variant="h5" align="center">
-            <span>{failedCamera.name} → </span>
-            <span
-              style={{
-                color: failedCamera.retrying
-                  ? theme.palette.warning.main
-                  : theme.palette.error.main,
-              }}
-            >
-              {failedCamera.retrying ? "Retrying Setup" : "Failed Setup"}
-            </span>
-          </Typography>
+          <Stack alignItems="center" spacing={1}>
+            <Typography variant="h5" align="center">
+              {failedCamera.name}
+            </Typography>
+            <Chip
+              size="small"
+              color={failedCamera.status.severity}
+              label={failedCamera.status.label}
+            />
+          </Stack>
         </CardContent>
         <CardMedia
           sx={{
@@ -91,7 +91,7 @@ export function FailedCameraCard({
               padding: 1,
             }}
           >
-            {failedCamera.error}
+            {failedCamera.status.detail || failedCamera.error}
           </Typography>
         </CardMedia>
       </CardActionArea>

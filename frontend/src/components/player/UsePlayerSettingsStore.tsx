@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
+import { ZoomPanTransform } from "lib/types";
+
 interface PlayerSettingsState {
   mjpegPlayerMap: Record<string, boolean>;
   setMjpegPlayer: (cameraId: string, value: boolean) => void;
@@ -20,6 +22,9 @@ interface PlayerSettingsState {
   setFlipView: (cameraId: string, value: boolean) => void;
   muteMap: Record<string, boolean>;
   setMute: (cameraId: string, value: boolean) => void;
+  zoomPanTransformMap: Record<string, ZoomPanTransform>;
+  setZoomPanTransform: (key: string, value: ZoomPanTransform) => void;
+  resetZoomPanTransform: (key: string) => void;
 }
 
 export const usePlayerSettingsStore = create<PlayerSettingsState>()(
@@ -73,6 +78,20 @@ export const usePlayerSettingsStore = create<PlayerSettingsState>()(
         set((state) => ({
           muteMap: { ...state.muteMap, [cameraId]: value },
         })),
+      zoomPanTransformMap: {},
+      setZoomPanTransform: (key, value) =>
+        set((state) => ({
+          zoomPanTransformMap: {
+            ...state.zoomPanTransformMap,
+            [key]: value,
+          },
+        })),
+      resetZoomPanTransform: (key) =>
+        set((state) => {
+          const { [key]: _removed, ...zoomPanTransformMap } =
+            state.zoomPanTransformMap;
+          return { zoomPanTransformMap };
+        }),
     }),
     { name: "player-settings-store", version: 1 },
   ),

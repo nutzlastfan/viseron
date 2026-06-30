@@ -18,12 +18,16 @@ import {
   useHlsStore,
   useReferencePlayerStore,
 } from "components/events/utils";
+import { usePlayerSettingsStore } from "components/player/UsePlayerSettingsStore";
+import { ZoomPanOverlay } from "components/player/ZoomPanOverlay";
 import { HlsErrorOverlay } from "components/player/hlsplayer/HlsErrorOverlay";
 import {
   cleanupHlsInstance,
   createHlsInstance,
   setupHlsErrorHandling,
 } from "components/player/hlsplayer/utils";
+import { usePersistedZoomPan } from "components/player/hooks/usePersistedZoomPan";
+import { useZoomPan } from "components/player/hooks/useZoomPan";
 import { useAuthContext } from "context/AuthContext";
 import { ViseronContext } from "context/ViseronContext";
 import { useFirstRender } from "hooks/UseFirstRender";
@@ -351,9 +355,20 @@ export function HlsPlayer({ camera }: HlsPlayerProps) {
   const theme = useTheme();
   const hlsRef = useRef<Hls | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const hlsClientIdRef = useRef<string>(uuidv4());
   const initialProgramDateTime = useRef<number | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isHovering, setIsHovering] = useState(false);
+  const fallbackAspectRatio = camera.mainstream.width / camera.mainstream.height;
+  const [contentAspectRatio, setContentAspectRatio] =
+    useState(fallbackAspectRatio);
+  const flipView = usePlayerSettingsStore(
+    (state) => state.flipViewMap[camera.identifier] ?? false,
+  );
+  const { persistedTransform, onTransformChange } = usePersistedZoomPan(
+    camera.identifier,
+  );
 
   const { hlsRefError } = useHlsStore(
     useShallow((state) => ({
@@ -376,6 +391,51 @@ export function HlsPlayer({ camera }: HlsPlayerProps) {
     camera,
     reInitPlayer,
   );
+
+  const isZoomPanDisabled = Boolean(isLoading || hlsRefError);
+  const {
+    transformStyle,
+    handleMouseDown,
+    resetTransform,
+    scale,
+    translateX,
+    translateY,
+    cursor,
+  } = useZoomPan(containerRef, {
+    minScale: 1.0,
+    maxScale: 5,
+    zoomSpeed: 0.2,
+    disabled: isZoomPanDisabled,
+    contentAspectRatio,
+    persistedTransform,
+    onTransformChange,
+  });
+
+  const updateContentAspectRatio = useCallback(() => {
+    const video = videoRef.current;
+    if (!video?.videoWidth || !video.videoHeight) {
+      return;
+    }
+    setContentAspectRatio(video.videoWidth / video.videoHeight);
+  }, []);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) {
+      return undefined;
+    }
+
+    video.addEventListener("loadedmetadata", updateContentAspectRatio);
+    video.addEventListener("loadeddata", updateContentAspectRatio);
+    video.addEventListener("resize", updateContentAspectRatio);
+    updateContentAspectRatio();
+
+    return () => {
+      video.removeEventListener("loadedmetadata", updateContentAspectRatio);
+      video.removeEventListener("loadeddata", updateContentAspectRatio);
+      video.removeEventListener("resize", updateContentAspectRatio);
+    };
+  }, [updateContentAspectRatio]);
 
   // Handle loading state
   useEffect(() => {
@@ -402,27 +462,63 @@ export function HlsPlayer({ camera }: HlsPlayerProps) {
 
   return (
     <div
+      ref={containerRef}
       style={{
         position: "relative",
         width: "100%",
         height: "100%",
         display: "flex",
+        overflow: "hidden",
+        cursor: isZoomPanDisabled ? "default" : cursor,
       }}
+      onMouseEnter={() => setIsHovering(true)}
+      onMouseLeave={() => setIsHovering(false)}
+      onMouseDown={isZoomPanDisabled ? undefined : handleMouseDown}
+      onDoubleClick={isZoomPanDisabled ? undefined : resetTransform}
+      role="button"
+      tabIndex={0}
+      aria-label={
+        isZoomPanDisabled
+          ? "Video player"
+          : "Video player - scroll to zoom, drag to pan, double-click to reset"
+      }
+      onKeyDown={
+        isZoomPanDisabled
+          ? undefined
+          : (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                resetTransform();
+              }
+            }
+      }
     >
       {/* Always render video-element */}
-      <video
-        ref={videoRef}
-        poster={BLANK_IMAGE}
+      <div
         style={{
           width: "100%",
           height: "100%",
-          objectFit: "contain",
-          backgroundColor: theme.palette.background.default,
+          display: "flex",
+          overflow: "hidden",
+          ...(!isZoomPanDisabled ? transformStyle : {}),
         }}
-        controls={false}
-        playsInline
-        muted
-      />
+      >
+        <video
+          ref={videoRef}
+          poster={BLANK_IMAGE}
+          style={{
+            width: "100%",
+            height: "100%",
+            objectFit: "contain",
+            backgroundColor: theme.palette.background.default,
+            pointerEvents: "none",
+            transform: flipView ? "rotate(180deg)" : "none",
+            transition: "transform 0.3s ease-in-out",
+          }}
+          controls={false}
+          playsInline
+          muted
+        />
+      </div>
 
       {/* Show loading indicator and when camera is connected */}
       {isLoading && (
@@ -447,6 +543,12 @@ export function HlsPlayer({ camera }: HlsPlayerProps) {
 
       {/* Show error overlay */}
       {hlsRef.current && <HlsErrorOverlay error={hlsRefError} />}
+      <ZoomPanOverlay
+        scale={scale}
+        translateX={translateX}
+        translateY={translateY}
+        isVisible={!isZoomPanDisabled && isHovering}
+      />
     </div>
   );
 }

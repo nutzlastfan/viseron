@@ -1,6 +1,7 @@
 import {
   Demo,
   IntrusionPrevention,
+  Renew,
   Roadmap,
   SettingsAdjust,
   VideoChat,
@@ -13,6 +14,7 @@ import CardActionArea from "@mui/material/CardActionArea";
 import CardActions from "@mui/material/CardActions";
 import CardContent from "@mui/material/CardContent";
 import CardMedia from "@mui/material/CardMedia";
+import Chip from "@mui/material/Chip";
 import CircularProgress from "@mui/material/CircularProgress";
 import IconButton from "@mui/material/IconButton";
 import Stack from "@mui/material/Stack";
@@ -31,7 +33,11 @@ import { useAuthContext } from "context/AuthContext";
 import { ViseronContext } from "context/ViseronContext";
 import { useFirstRender } from "hooks/UseFirstRender";
 import useOnScreen from "hooks/UseOnScreen";
-import { useCamera, useCameraStartStop } from "lib/api/camera";
+import {
+  useCamera,
+  useCameraReconnect,
+  useCameraStartStop,
+} from "lib/api/camera";
 import { BASE_PATH } from "lib/api/client";
 import * as types from "lib/types";
 
@@ -64,6 +70,54 @@ interface CameraCardProps {
 const blankImage =
   "data:image/svg+xml;charset=utf8,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%3E%3C/svg%3E";
 
+const unknownCameraStatus: types.CameraRuntimeStatus = {
+  state: "stale",
+  label: "Status unavailable",
+  severity: "warning",
+  detail: "Camera status is temporarily unavailable",
+  live: {
+    available: false,
+    reachable: false,
+    blocked: false,
+    reason: null,
+  },
+  recording: {
+    active: false,
+    blocked: false,
+    reason: null,
+    state: "stale",
+  },
+  last_frame_age: null,
+  latest_segment_age: null,
+  stale_frame: {
+    stale: true,
+    threshold: 0,
+    age: null,
+  },
+};
+
+function cameraStatus(camera: types.Camera) {
+  return camera.status ?? unknownCameraStatus;
+}
+
+function statusColor(status: types.CameraRuntimeStatus) {
+  return status.severity === "info" ? "default" : status.severity;
+}
+
+function cameraStatusDetail(camera: types.Camera) {
+  const status = cameraStatus(camera);
+  if (status.detail) {
+    return status.detail;
+  }
+  if (status.last_frame_age !== null && status.state !== "connected") {
+    return `Last frame ${Math.round(status.last_frame_age)}s ago`;
+  }
+  if (status.latest_segment_age !== null && status.state !== "connected") {
+    return `Last segment ${Math.round(status.latest_segment_age)}s ago`;
+  }
+  return status.label;
+}
+
 function SuccessCameraCard({
   camera,
   buttons = true,
@@ -78,8 +132,16 @@ function SuccessCameraCard({
   const onScreen = useOnScreen<HTMLDivElement>(ref);
   const isVisible = usePageVisibility();
   const firstRender = useFirstRender();
+  const livePolicy = camera.effective_policy?.live;
+  const recordingPolicy = camera.effective_policy?.recording;
+  const status = cameraStatus(camera);
+  const liveBlocked = livePolicy?.allowed === false;
+  const recordingBlocked = recordingPolicy?.allowed === false;
+  const canManageCamera =
+    !auth.enabled || user?.role === "admin" || user?.role === "write";
 
   const cameraStartStop = useCameraStartStop();
+  const cameraReconnect = useCameraReconnect();
 
   const generateSnapshotURL = useCallback(
     (width = null) =>
@@ -125,7 +187,13 @@ function SuccessCameraCard({
 
   useEffect(() => {
     // If element is on screen and browser is visible, start interval to fetch images
-    if (onScreen && isVisible && connected && camera.still_image.available) {
+    if (
+      onScreen &&
+      isVisible &&
+      connected &&
+      camera.still_image.available &&
+      !liveBlocked
+    ) {
       updateImage();
       updateSnapshot.current = setInterval(
         () => {
@@ -152,6 +220,7 @@ function SuccessCameraCard({
     connected,
     camera.still_image.available,
     camera.still_image.refresh_interval,
+    liveBlocked,
   ]);
 
   return (
@@ -179,9 +248,18 @@ function SuccessCameraCard({
           <CameraNameOverlay camera_identifier={camera.identifier} />
         ) : (
           <CardContent>
-            <Typography variant="h5" align="center">
-              {camera.name}
-            </Typography>
+            <Stack alignItems="center" spacing={1}>
+              <Typography variant="h5" align="center">
+                {camera.name}
+              </Typography>
+              {status.state !== "connected" && (
+                <Chip
+                  size="small"
+                  color={statusColor(status)}
+                  label={status.label}
+                />
+              )}
+            </Stack>
           </CardContent>
         )}
         <CardActionArea
@@ -191,15 +269,18 @@ function SuccessCameraCard({
           sx={onClick ? null : { pointerEvents: "none" }}
         >
           <CardMedia>
-            {!camera.connected ? (
+            {liveBlocked ? (
               <Box
                 sx={{
                   aspectRatio:
                     camera.still_image.width / camera.still_image.height,
                   backgroundColor: theme.palette.background.default,
                   display: "flex",
+                  flexDirection: "column",
                   alignItems: "center",
                   justifyContent: "center",
+                  gap: 1,
+                  px: 2,
                 }}
               >
                 <VideoOff
@@ -209,6 +290,42 @@ function SuccessCameraCard({
                     opacity: 0.5,
                   }}
                 />
+                <Typography
+                  variant="body2"
+                  color="text.secondary"
+                  align="center"
+                >
+                  {livePolicy?.reason || "Live view is blocked by schedule"}
+                </Typography>
+              </Box>
+            ) : !camera.connected ? (
+              <Box
+                sx={{
+                  aspectRatio:
+                    camera.still_image.width / camera.still_image.height,
+                  backgroundColor: theme.palette.background.default,
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 1,
+                  px: 2,
+                }}
+              >
+                <VideoOff
+                  size={48}
+                  style={{
+                    color: theme.palette.text.secondary,
+                    opacity: 0.5,
+                  }}
+                />
+                <Typography
+                  variant="body2"
+                  color="text.secondary"
+                  align="center"
+                >
+                  {cameraStatusDetail(camera)}
+                </Typography>
               </Box>
             ) : (
               <Image
@@ -279,6 +396,16 @@ function SuccessCameraCard({
                     />
                   </div>
                 </Tooltip>
+                {status.state !== "connected" && (
+                  <Tooltip title={cameraStatusDetail(camera)}>
+                    <Chip
+                      size="small"
+                      color={statusColor(status)}
+                      label={status.label}
+                      sx={{ maxWidth: 180 }}
+                    />
+                  </Tooltip>
+                )}
               </Stack>
               <Box sx={{ flexGrow: 1 }} />
               <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
@@ -302,18 +429,41 @@ function SuccessCameraCard({
                   <IconButton
                     component={Link}
                     to={`/recordings/${camera.identifier}`}
+                    color={recordingBlocked ? "warning" : "default"}
                   >
                     <Demo size={20} />
                   </IconButton>
                 </Tooltip>
-                <Tooltip title="Live View">
-                  <IconButton
-                    component={Link}
-                    to={`/live?camera=${camera.identifier}`}
-                  >
-                    <VideoChat size={20} />
-                  </IconButton>
+                <Tooltip
+                  title={
+                    liveBlocked
+                      ? livePolicy?.reason || "Live view is blocked by schedule"
+                      : "Live View"
+                  }
+                >
+                  <span>
+                    <IconButton
+                      component={Link}
+                      to={`/live?camera=${camera.identifier}`}
+                      disabled={liveBlocked}
+                    >
+                      <VideoChat size={20} />
+                    </IconButton>
+                  </span>
                 </Tooltip>
+                {canManageCamera && (
+                  <Tooltip title="Reconnect Camera">
+                    <span>
+                      <IconButton
+                        disabled={cameraReconnect.isPending}
+                        onClick={() => cameraReconnect.mutate({ camera })}
+                        color={status.state === "stale" ? "warning" : "default"}
+                      >
+                        <Renew size={20} />
+                      </IconButton>
+                    </span>
+                  </Tooltip>
+                )}
                 {(!auth.enabled || user?.role === "admin") && (
                   <Tooltip title="Camera Tuning">
                     <IconButton

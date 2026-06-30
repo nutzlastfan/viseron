@@ -17,6 +17,7 @@ from viseron.components.nvr.const import (
 )
 from viseron.components.nvr.nvr import EVENT_MOTION_DETECTOR_RESULT, NVR
 from viseron.components.storage.models import TriggerTypes
+from viseron.components.webserver.const import COMPONENT as WEBSERVER_COMPONENT
 from viseron.domain_registry import DomainState
 from viseron.domains.camera import EventFrameBytesData
 from viseron.domains.camera.recorder import ManualRecording
@@ -106,6 +107,24 @@ def feed_frame_to_nvr(nvr) -> None:
         utcnow().timestamp(),
     )
     nvr._frame_queue.put_nowait(frame)
+
+
+def set_recording_schedule_decision(
+    vis: MockViseron,
+    *,
+    allowed: bool = True,
+    scheduled_recording: bool = False,
+    reason: str | None = None,
+):
+    """Set a concrete recording schedule decision on the mocked webserver."""
+    decision = SimpleNamespace(
+        allowed=allowed,
+        scheduled_recording=scheduled_recording,
+        reason=reason,
+        rule_name="Test schedule",
+    )
+    vis.data[WEBSERVER_COMPONENT].camera_policy.decision.return_value = decision
+    return decision
 
 
 def make_nvr(
@@ -1081,3 +1100,80 @@ class TestNVRRunManualRecording:
         assert "Max recording time exceeded, stopping recorder" in caplog.text
         nvr.stop_recorder.assert_called_once_with(force=True)
         assert not camera.is_recording
+
+
+class TestNVRScheduledRecording:
+    """_run tests (scheduled recording)."""
+
+    def test_scheduled_recording_uses_schedule_trigger_and_stays_active(
+        self, vis, monkeypatch
+    ):
+        """Scheduled recording starts with its own trigger and is not event-stopped."""
+        nvr, camera = make_nvr(vis, camera_output_fps=5)
+        fake_time = FakeTime()
+        patch_nvr_utcnow(monkeypatch, fake_time)
+        configure_camera_for_recording_tests(camera, fake_time, idle_timeout=2)
+        set_recording_schedule_decision(vis, scheduled_recording=True)
+
+        feed_frame_to_nvr(nvr)
+        nvr._run()
+        assert camera.is_recording
+        assert camera.recorder.active_recording.trigger_type == TriggerTypes.SCHEDULE
+        assert camera.start_recorder.call_count == 1
+
+        for _ in range(3):
+            fake_time.advance(3)
+            feed_frame_to_nvr(nvr)
+            nvr._run()
+
+        assert camera.is_recording
+        assert camera.start_recorder.call_count == 1
+        nvr.stop_recorder.assert_not_called()
+
+    def test_scheduled_recording_stops_when_window_ends(self, vis, monkeypatch):
+        """Scheduled recording stops immediately after the schedule window ends."""
+        nvr, camera = make_nvr(vis, camera_output_fps=5)
+        fake_time = FakeTime()
+        patch_nvr_utcnow(monkeypatch, fake_time)
+        configure_camera_for_recording_tests(camera, fake_time, idle_timeout=2)
+        decision = set_recording_schedule_decision(vis, scheduled_recording=True)
+
+        feed_frame_to_nvr(nvr)
+        nvr._run()
+        assert camera.is_recording
+
+        decision.scheduled_recording = False
+        feed_frame_to_nvr(nvr)
+        nvr._run()
+
+        nvr.stop_recorder.assert_called_once_with(force=True)
+        assert not camera.is_recording
+
+    def test_manual_recording_during_schedule_remains_manual(self, vis, monkeypatch):
+        """Manual recording can temporarily replace scheduled recording."""
+        nvr, camera = make_nvr(vis, camera_output_fps=5)
+        fake_time = FakeTime()
+        patch_nvr_utcnow(monkeypatch, fake_time)
+        configure_camera_for_recording_tests(camera, fake_time, idle_timeout=2)
+        set_recording_schedule_decision(vis, scheduled_recording=True)
+
+        feed_frame_to_nvr(nvr)
+        nvr._run()
+        assert camera.recorder.active_recording.trigger_type == TriggerTypes.SCHEDULE
+
+        nvr.start_manual_recording(ManualRecording(duration=2))
+        feed_frame_to_nvr(nvr)
+        nvr._run()
+        assert camera.is_recording
+        assert camera.recorder.active_recording.trigger_type == TriggerTypes.MANUAL
+
+        fake_time.advance(3)
+        feed_frame_to_nvr(nvr)
+        nvr._run()
+        nvr.stop_recorder.assert_called_with(force=True)
+        assert not camera.is_recording
+
+        feed_frame_to_nvr(nvr)
+        nvr._run()
+        assert camera.is_recording
+        assert camera.recorder.active_recording.trigger_type == TriggerTypes.SCHEDULE

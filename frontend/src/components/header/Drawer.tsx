@@ -1,5 +1,7 @@
 import {
   Book,
+  Dashboard,
+  DataBlob,
   Demo,
   IntrusionPrevention,
   LogoGithub,
@@ -7,6 +9,7 @@ import {
   Roadmap,
   Settings,
   TableSplit,
+  Time,
   Video,
   VideoChat,
 } from "@carbon/icons-react";
@@ -79,6 +82,19 @@ const getDrawerItems = (
       path: "/live",
     },
     { type: "link", title: "Entities", icon: TableSplit, path: "/entities" },
+    { type: "link", title: "Feeders", icon: DataBlob, path: "/feeders" },
+    ...(!auth.enabled ||
+    user?.role === "admin" ||
+    user?.role === "write"
+      ? [
+          {
+            type: "link",
+            title: "Recording Schedule",
+            icon: Time,
+            path: "/settings/recording-schedule",
+          } as DrawerItemTypes,
+        ]
+      : []),
     ...(!auth.enabled || (auth.enabled && user?.role === "admin")
       ? [
           { type: "divider" } as DrawerItemTypes,
@@ -88,6 +104,12 @@ const getDrawerItems = (
             title: "Settings",
             icon: Settings,
             path: "/settings",
+          } as DrawerItemTypes,
+          {
+            type: "link",
+            title: "System Health",
+            icon: Dashboard,
+            path: "/settings/system-health",
           } as DrawerItemTypes,
         ]
       : []),

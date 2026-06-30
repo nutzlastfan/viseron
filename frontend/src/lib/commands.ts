@@ -113,18 +113,46 @@ const exportErrorCallback = (
 const handleExport = async (
   camera_identifier: string,
   toast: ReturnType<typeof useToast>,
+  exportDestination: types.ExportDestination,
   exportFn: (
     successCallback: (message: types.DownloadFileResponse) => Promise<void>,
     errorCallback: (message: types.WebSocketSubscriptionErrorResponse) => void,
   ) => Promise<void>,
 ) => {
   const cameraName = getCameraNameFromQueryCache(camera_identifier);
-  const toastId = toast.info(`${cameraName}: Preparing download...`, {
-    autoClose: false,
-  });
+  const toastId = toast.info(
+    `${cameraName}: Preparing ${
+      exportDestination === "browser" ? "download" : "server export"
+    }...`,
+    {
+      autoClose: false,
+    },
+  );
+
+  const handleSuccess = async (message: types.DownloadFileResponse) => {
+    if (message.destination && message.destination !== "browser") {
+      toast.update(toastId, {
+        type: "success",
+        render: `${cameraName}: Export copied to ${
+          message.destination_name || message.destination
+        } (${message.filename})`,
+        autoClose: 8000,
+      });
+      return;
+    }
+    if (!message.token) {
+      toast.update(toastId, {
+        type: "error",
+        render: `${cameraName}: Export did not return a download token.`,
+        autoClose: 5000,
+      });
+      return;
+    }
+    await downloadFile(message, toastId, cameraName);
+  };
 
   await exportFn(
-    (message) => downloadFile(message, toastId, cameraName),
+    handleSuccess,
     (message) => exportErrorCallback(message, toast, toastId, cameraName),
   );
 };
@@ -133,10 +161,23 @@ export const exportRecording = async (
   connection: Connection,
   camera_identifier: string,
   recording_id: number,
+  zoom_pan_transform: types.ZoomPanTransform | undefined,
+  exportDestination: types.ExportDestination,
   toast: ReturnType<typeof useToast>,
 ) => {
-  await handleExport(camera_identifier, toast, (success, error) =>
-    connection.exportRecording(camera_identifier, recording_id, success, error),
+  await handleExport(
+    camera_identifier,
+    toast,
+    exportDestination,
+    (success, error) =>
+      connection.exportRecording(
+        camera_identifier,
+        recording_id,
+        zoom_pan_transform,
+        exportDestination,
+        success,
+        error,
+      ),
   );
 };
 
@@ -145,16 +186,22 @@ export const exportSnapshot = async (
   event_type: string,
   camera_identifier: string,
   snapshot_id: number,
+  exportDestination: types.ExportDestination,
   toast: ReturnType<typeof useToast>,
 ) => {
-  await handleExport(camera_identifier, toast, (success, error) =>
-    connection.exportSnapshot(
-      event_type,
-      camera_identifier,
-      snapshot_id,
-      success,
-      error,
-    ),
+  await handleExport(
+    camera_identifier,
+    toast,
+    exportDestination,
+    (success, error) =>
+      connection.exportSnapshot(
+        event_type,
+        camera_identifier,
+        snapshot_id,
+        exportDestination,
+        success,
+        error,
+      ),
   );
 };
 
@@ -163,12 +210,28 @@ export const exportTimespan = async (
   camera_identifiers: string[],
   start: number,
   end: number,
+  getZoomPanTransform:
+    | ((camera_identifier: string) => types.ZoomPanTransform | undefined)
+    | undefined,
+  exportDestination: types.ExportDestination,
   toast: ReturnType<typeof useToast>,
 ) => {
   for (const camera_identifier of camera_identifiers) {
     // eslint-disable-next-line no-await-in-loop
-    await handleExport(camera_identifier, toast, (success, error) =>
-      connection.exportTimespan(camera_identifier, start, end, success, error),
+    await handleExport(
+      camera_identifier,
+      toast,
+      exportDestination,
+      (success, error) =>
+        connection.exportTimespan(
+          camera_identifier,
+          start,
+          end,
+          getZoomPanTransform?.(camera_identifier),
+          exportDestination,
+          success,
+          error,
+        ),
     );
   }
 };

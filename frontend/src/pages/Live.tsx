@@ -7,6 +7,7 @@ import {
   Maximize,
   Minimize,
   VideoAdd,
+  VideoOff,
   WifiBridgeAlt,
 } from "@carbon/icons-react";
 import Box from "@mui/material/Box";
@@ -600,9 +601,12 @@ export const FloatingMenu = memo(
         <Box
           ref={menuBoxRef}
           sx={{
+            alignItems: "center",
+            display: "flex",
+            gap: 1,
             position: "absolute",
-            bottom: isFullscreen ? 9 : 16,
             left: isFullscreen ? 9 : 25,
+            top: 56,
             zIndex: 1000,
             opacity: isFullscreen && !isMenuVisible ? 0 : 1,
             transition: "opacity 0.3s ease-in-out",
@@ -620,7 +624,6 @@ export const FloatingMenu = memo(
               size="small"
               color="primary"
               onClick={() => setCameraDialogOpen(true)}
-              sx={{ mr: 1 }}
             >
               <VideoAdd size={20} />
             </Fab>
@@ -635,7 +638,6 @@ export const FloatingMenu = memo(
               size="small"
               color="primary"
               onClick={() => setGridLayoutDialogOpen(true)}
-              sx={{ mr: 1 }}
             >
               <Grid size={20} />
             </Fab>
@@ -663,9 +665,11 @@ const CameraPlayer = memo(
   ({
     camera,
     playerRef,
+    active = true,
   }: {
     camera: types.Camera | types.FailedCamera;
     playerRef: React.RefObject<VideoRTC | null>;
+    active?: boolean;
   }) => {
     const theme = useTheme();
     const menuContext = useContext(MenuContext);
@@ -734,6 +738,31 @@ const CameraPlayer = memo(
       () => <PlayerMenu onMenuOpen={handleMenuOpen} />,
       [handleMenuOpen],
     );
+
+    if (!active) {
+      return (
+        <Box
+          sx={{
+            width: "100%",
+            height: "100%",
+            minHeight: 160,
+            backgroundColor: theme.palette.background.default,
+            color: theme.palette.text.secondary,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 1,
+          }}
+          data-camera-player={camera.identifier}
+        >
+          <VideoOff size={36} style={{ opacity: 0.55 }} />
+          <Typography variant="caption" align="center">
+            Stream paused
+          </Typography>
+        </Box>
+      );
+    }
 
     return mjpegPlayer ? (
       <div
@@ -807,7 +836,10 @@ export function PlayerCard() {
     (
       camera: types.Camera | types.FailedCamera,
       playerRef: React.RefObject<VideoRTC | null>,
-    ) => <CameraPlayer camera={camera} playerRef={playerRef} />,
+      active: boolean,
+    ) => (
+      <CameraPlayer camera={camera} playerRef={playerRef} active={active} />
+    ),
     [],
   );
 

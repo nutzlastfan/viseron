@@ -1,4 +1,9 @@
-import { UseQueryOptions, useMutation, useQuery } from "@tanstack/react-query";
+import {
+  UseQueryOptions,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 
 import { useToast } from "hooks/UseToast";
 import { viseronAPI } from "lib/api/client";
@@ -63,6 +68,7 @@ export function useCamera<T extends boolean = false>(
   return useQuery({
     queryKey: ["camera", camera_identifier],
     queryFn: async () => getCamera({ camera_identifier, failed }),
+    refetchInterval: 30000,
     ...configOptions,
   });
 }
@@ -137,6 +143,44 @@ export const useCameraStartStop = () => {
       toast.error(
         error.response && error.response.data.error
           ? `Error ${variables.action === "start" ? "starting" : "stopping"} camera: ${error.response.data.error}`
+          : `An error occurred: ${error.message}`,
+      );
+    },
+  });
+};
+
+type CameraReconnectVariables = {
+  camera: types.Camera;
+};
+
+async function reconnectCamera({ camera }: CameraReconnectVariables) {
+  const response = await viseronAPI.post<types.APISuccessResponse>(
+    `/camera/${camera.identifier}/reconnect`,
+  );
+  return response.data;
+}
+
+export const useCameraReconnect = () => {
+  const toast = useToast();
+  const queryClient = useQueryClient();
+  return useMutation<
+    types.APISuccessResponse,
+    types.APIErrorResponse,
+    CameraReconnectVariables
+  >({
+    mutationFn: reconnectCamera,
+    onSuccess: async (_data, variables, _context) => {
+      toast.success(`Camera reconnect requested: ${variables.camera.name}`);
+      await queryClient.invalidateQueries({
+        queryKey: ["camera", variables.camera.identifier],
+      });
+      await queryClient.invalidateQueries({ queryKey: ["cameras"] });
+      await queryClient.invalidateQueries({ queryKey: ["system_health"] });
+    },
+    onError: async (error, variables, _context) => {
+      toast.error(
+        error.response && error.response.data.error
+          ? `Error reconnecting camera ${variables.camera.name}: ${error.response.data.error}`
           : `An error occurred: ${error.message}`,
       );
     },

@@ -36,7 +36,9 @@ def get_handler(api_version: str, endpoint: str):
         module = importlib.import_module(
             f"viseron.components.webserver.api.{api_version}.{endpoint}"
         )
-        handler_name = f"{endpoint.title()}APIHandler"
+        handler_name = (
+            f"{''.join(part.title() for part in endpoint.split('_'))}APIHandler"
+        )
         if hasattr(module, handler_name):
             return getattr(module, handler_name)
     except ImportError as error:

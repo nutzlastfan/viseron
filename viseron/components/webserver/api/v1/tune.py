@@ -10,6 +10,7 @@ from ruamel.yaml.scalarstring import ScalarString
 
 from viseron.components.webserver.api.handlers import BaseAPIHandler
 from viseron.components.webserver.auth import Role
+from viseron.components.webserver.config_backup import backup_config
 from viseron.const import CONFIG_PATH
 
 from .tuning import (
@@ -259,6 +260,7 @@ class TuneAPIHandler(BaseAPIHandler):
         yaml = YAML(typ="rt")  # round-trip mode, required to keep comments
         yaml.preserve_quotes = True
 
+        backup_config("camera_tune")
         with open(CONFIG_PATH, "w", encoding="utf-8") as config_file:
             yaml.dump(config, config_file)
 

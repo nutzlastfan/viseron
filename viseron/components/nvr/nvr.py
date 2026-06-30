@@ -20,8 +20,14 @@ from viseron.components.nvr.const import COMPONENT
 from viseron.components.nvr.sensor import OperationStateSensor
 from viseron.components.nvr.toggle import ManualRecordingToggle
 from viseron.components.storage.models import TriggerTypes
+from viseron.components.webserver.const import COMPONENT as WEBSERVER_COMPONENT
 from viseron.const import VISERON_SIGNAL_SHUTDOWN
-from viseron.domains.camera.const import DOMAIN as CAMERA_DOMAIN
+from viseron.domains.camera.const import (
+    DOMAIN as CAMERA_DOMAIN,
+    EVENT_CAMERA_STATUS,
+    EVENT_CAMERA_STATUS_CONNECTED,
+    EVENT_CAMERA_STATUS_DISCONNECTED,
+)
 from viseron.domains.motion_detector import AbstractMotionDetectorScanner
 from viseron.domains.motion_detector.const import (
     EVENT_MOTION_DETECTOR_RESULT,
@@ -69,6 +75,7 @@ if TYPE_CHECKING:
     from viseron.helpers.filter import Filter
 
 LOGGER = logging.getLogger(__name__)
+OFFLINE_RECORDING_GRACE_SECONDS = 30
 
 
 def setup(vis: Viseron, config: dict[str, Any], identifier: str) -> bool:
@@ -278,9 +285,11 @@ class NVR(AbstractNVR):
         self._seconds_left = 0
         self._manual_recording: ManualRecording | None = None
         self._start_manual_recording = False
+        self._scheduled_recording = False
         self._kill_received = False
         self._removal_timers: list[threading.Timer] = []
         self._operation_state: OperationState | None = None
+        self._offline_recorder_timer: threading.Timer | None = None
 
         self._frame_scanners: dict[str, FrameIntervalCalculator] = {}
         self._current_frame_scanners: dict[str, FrameIntervalCalculator] = {}
@@ -387,6 +396,12 @@ class NVR(AbstractNVR):
         self._listeners.append(
             self._vis.listen_event(self._camera.frame_bytes_topic, self._frame_queue)
         )
+        self._listeners.append(
+            self._vis.listen_event(
+                EVENT_CAMERA_STATUS.format(camera_identifier=self._camera.identifier),
+                self._camera_status_changed,
+            )
+        )
         self._first_frame_log = True
         self._nvr_thread = RestartableThread(
             name=str(self),
@@ -427,6 +442,80 @@ class NVR(AbstractNVR):
             except DomainNotRegisteredError:
                 continue
             self._post_processors[domain] = post_processor
+
+    def _camera_status_changed(self, event: Event) -> None:
+        """Handle camera online/offline transitions."""
+        status = event.data.status
+        if status == EVENT_CAMERA_STATUS_DISCONNECTED:
+            self._schedule_offline_recording_stop()
+        elif status == EVENT_CAMERA_STATUS_CONNECTED:
+            self._cancel_offline_recording_stop()
+
+    def _schedule_offline_recording_stop(self) -> None:
+        """Stop active recording if camera stays offline past the grace period."""
+        if not self._camera.is_recording or self._offline_recorder_timer:
+            return
+
+        self._logger.info(
+            "Camera disconnected during recording, allowing %ss grace period",
+            OFFLINE_RECORDING_GRACE_SECONDS,
+        )
+        self._offline_recorder_timer = threading.Timer(
+            OFFLINE_RECORDING_GRACE_SECONDS,
+            self._stop_recording_after_offline_grace,
+        )
+        self._offline_recorder_timer.name = f"{self!s}.offline_recording_grace"
+        self._offline_recorder_timer.daemon = True
+        self._offline_recorder_timer.start()
+
+    def _cancel_offline_recording_stop(self, *, reconnected: bool = True) -> None:
+        """Cancel pending offline stop when camera comes back."""
+        if not self._offline_recorder_timer:
+            return
+
+        if reconnected:
+            self._logger.info(
+                "Camera reconnected before recording grace period elapsed"
+            )
+        self._offline_recorder_timer.cancel()
+        self._offline_recorder_timer = None
+
+    def _stop_recording_after_offline_grace(self) -> None:
+        """Stop active recording after the camera stayed offline."""
+        self._offline_recorder_timer = None
+        if not self._camera.is_recording or self._camera.connected:
+            return
+
+        self._logger.info(
+            "Camera stayed offline for %ss, stopping active recording",
+            OFFLINE_RECORDING_GRACE_SECONDS,
+        )
+        self.stop_recorder(force=True)
+        self._manual_recording = None
+        self._start_manual_recording = False
+        self._start_recorder = False
+        self._scheduled_recording = False
+        self._trigger_type = None
+
+    def _recording_policy_decision(self) -> Any | None:
+        """Return recording policy decision if the webserver is available."""
+        webserver = self._vis.data.get(WEBSERVER_COMPONENT)
+        if not webserver:
+            return None
+        decision = webserver.camera_policy.decision(
+            self._camera.identifier,
+            "recording",
+            allow_override=True,
+        )
+        if not isinstance(getattr(decision, "allowed", None), bool):
+            return None
+        return decision
+
+    def _active_recording_trigger_type(self) -> TriggerTypes | None:
+        """Return the active recording trigger type, if any."""
+        if not self._camera.recorder.active_recording:
+            return None
+        return self._camera.recorder.active_recording.trigger_type
 
     def calculate_output_fps(self, scanners: list[FrameIntervalCalculator]) -> None:
         """Calculate output fps based on fps of all scanners."""
@@ -504,6 +593,14 @@ class NVR(AbstractNVR):
 
     def start_manual_recording(self, manual_recording: ManualRecording) -> None:
         """Start a manual recording with a set duration."""
+        decision = self._recording_policy_decision()
+        if decision and not decision.allowed:
+            self._logger.info(
+                "Manual recording blocked by schedule: %s",
+                decision.reason or "schedule",
+            )
+            return
+
         self._logger.debug(
             "Received request to start manual recording with duration: "
             f"{manual_recording.duration}"
@@ -529,6 +626,7 @@ class NVR(AbstractNVR):
                 "Event recording in progress, starting manual recording instead"
             )
             self.stop_recorder(force=True)
+            self._scheduled_recording = False
 
         self._start_manual_recording = False
         self._trigger_type = TriggerTypes.MANUAL
@@ -790,8 +888,55 @@ class NVR(AbstractNVR):
 
     def process_recorder(self, shared_frame: SharedFrame) -> None:
         """Check if we should start or stop the recorder."""
+        decision = self._recording_policy_decision()
+        active_trigger_type = self._active_recording_trigger_type()
+
+        if decision and not decision.allowed:
+            if self._camera.is_recording:
+                self._logger.info(
+                    "Recording blocked by schedule: %s",
+                    decision.reason or "schedule",
+                )
+                self.stop_recorder(force=True)
+            self._manual_recording = None
+            self._start_manual_recording = False
+            self._start_recorder = False
+            self._scheduled_recording = False
+            self._trigger_type = None
+            return
+
+        if decision and decision.scheduled_recording:
+            if not self._camera.is_recording:
+                self._logger.info(
+                    "Starting scheduled recording: %s",
+                    decision.reason or decision.rule_name or "schedule",
+                )
+                self._scheduled_recording = True
+                self._start_recorder = True
+                self._trigger_type = TriggerTypes.SCHEDULE
+            elif active_trigger_type == TriggerTypes.SCHEDULE:
+                self._scheduled_recording = True
+            else:
+                self._scheduled_recording = False
+        elif (
+            self._scheduled_recording
+            or active_trigger_type == TriggerTypes.SCHEDULE
+            or self._trigger_type == TriggerTypes.SCHEDULE
+        ):
+            self._logger.info("Scheduled recording window ended")
+            self._scheduled_recording = False
+            if (
+                self._camera.is_recording
+                and active_trigger_type == TriggerTypes.SCHEDULE
+            ):
+                self.stop_recorder(force=True)
+            self._start_recorder = False
+            self._trigger_type = None
+            return
+
         if self._start_recorder and self._trigger_type:
             self.start_recorder(shared_frame, self._trigger_type)
+            active_trigger_type = self._trigger_type
             self._trigger_type = None
             self._start_recorder = False
         # Stop recording if max_recording_time is exceeded
@@ -804,14 +949,19 @@ class NVR(AbstractNVR):
         elif (
             self._camera.is_recording
             and self._camera.recorder.active_recording
-            and self._camera.recorder.active_recording.trigger_type
-            == TriggerTypes.MANUAL
+            and active_trigger_type == TriggerTypes.MANUAL
         ):
             # Nested if in order to not end up in the block below
             if self.manual_recording_ended:
                 self._logger.info("Manual recording stopped or time exceeded")
                 self.stop_recorder(force=True)
                 return
+        elif (
+            self._camera.is_recording
+            and active_trigger_type == TriggerTypes.SCHEDULE
+        ):
+            self._stop_recorder_at = None
+            self._seconds_left = 0
         elif self._camera.is_recording and self.event_over():
             self.stop_recorder()
         else:
@@ -899,6 +1049,7 @@ class NVR(AbstractNVR):
         """Stop processing of events."""
         self._logger.info("Stopping NVR thread")
         self._kill_received = True
+        self._cancel_offline_recording_stop(reconnected=False)
 
         # Stop frame grabber
         self._camera.stop_camera()

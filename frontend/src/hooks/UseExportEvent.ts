@@ -1,13 +1,16 @@
 import { useContext } from "react";
 
 import { ViseronContext } from "context/ViseronContext";
+import { getExportDestination } from "hooks/UseExportDestination";
 import { useToast } from "hooks/UseToast";
+import { useZoomPanExportTransform } from "hooks/UseZoomPanExportTransform";
 import { exportRecording, exportSnapshot } from "lib/commands";
 import * as types from "lib/types";
 
 export const useExportEvent = () => {
   const viseron = useContext(ViseronContext);
   const toast = useToast();
+  const getZoomPanTransform = useZoomPanExportTransform();
 
   const exportEvent = async (event: types.CameraEvent) => {
     if (!viseron.connection) {
@@ -24,6 +27,7 @@ export const useExportEvent = () => {
           event.type,
           event.camera_identifier,
           event.id,
+          getExportDestination(),
           toast,
         );
         return event;
@@ -33,6 +37,8 @@ export const useExportEvent = () => {
           viseron.connection,
           event.camera_identifier,
           event.id,
+          getZoomPanTransform(event.camera_identifier),
+          getExportDestination(),
           toast,
         );
         return event;

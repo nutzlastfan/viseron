@@ -7,6 +7,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { CameraNameOverlay } from "components/camera/CameraNameOverlay";
 import { CustomControls } from "components/player/CustomControls.js";
 import { ZoomPanOverlay } from "components/player/ZoomPanOverlay";
+import { usePersistedZoomPan } from "components/player/hooks/usePersistedZoomPan";
 import { useZoomPan } from "components/player/hooks/useZoomPan";
 import { useLivePlayerControls } from "components/player/liveplayer/useLivePlayerControls";
 import { VideoRTC } from "components/player/liveplayer/video-rtc.js";
@@ -108,6 +109,9 @@ export function LivePlayer({
   const containerRef = useRef<HTMLDivElement>(null);
   const theme = useTheme();
   const canHover = useCanHover();
+  const { persistedTransform, onTransformChange } = usePersistedZoomPan(
+    camera.identifier,
+  );
 
   const {
     status: playerStatus,
@@ -135,10 +139,17 @@ export function LivePlayer({
     isFullscreen,
     isPictureInPicture,
   } = useLivePlayerControls(elementRef, camera, onPlayerFullscreenChange);
+  const livePolicy = !camera.failed ? camera.effective_policy?.live : undefined;
+  const recordingPolicy = !camera.failed
+    ? camera.effective_policy?.recording
+    : undefined;
+  const liveBlocked = livePolicy?.allowed === false;
+  const recordingBlocked = recordingPolicy?.allowed === false;
 
   // Disable zoom/pan when loading, camera is disconnected and still loading or has error
   const isZoomPanDisabled: boolean = Boolean(
     isLoading ||
+      liveBlocked ||
       (!camera.failed && !(camera as types.Camera).connected) ||
       hasError,
   );
@@ -156,14 +167,16 @@ export function LivePlayer({
     maxScale: 5,
     zoomSpeed: 0.2,
     disabled: isZoomPanDisabled,
+    persistedTransform,
+    onTransformChange,
   });
 
   useEffect(() => {
-    if (elementRef.current) {
+    if (elementRef.current && !liveBlocked) {
       elementRef.current.src = src;
       elementRef.current.controls = false; // Always hide native controls
     }
-  }, [elementRef, src]);
+  }, [elementRef, liveBlocked, src]);
 
   return (
     <div
@@ -215,7 +228,9 @@ export function LivePlayer({
         onFullscreenToggle={handleFullscreenToggle}
         onPictureInPictureToggle={handlePictureInPictureToggle}
         isPictureInPictureSupported={isPictureInPictureSupported}
-        onManualRecording={camera.failed ? undefined : handleManualRecording}
+        onManualRecording={
+          camera.failed || recordingBlocked ? undefined : handleManualRecording
+        }
         isRecording={camera.failed ? undefined : camera.is_recording}
         manualRecordingLoading={manualRecordingLoading}
         extraButtons={extraButtons}
@@ -232,7 +247,45 @@ export function LivePlayer({
         }}
       >
         {/* Show placeholder when camera is disconnected (but NOT when in PiP mode) */}
+        {!camera.failed && liveBlocked && !isPictureInPicture && (
+          <Box
+            sx={{
+              width: "100%",
+              height: "100%",
+              backgroundColor: theme.palette.background.default,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              minHeight: 200,
+              gap: 2,
+              px: 2,
+            }}
+          >
+            <VideoOff
+              size={48}
+              style={{
+                color: theme.palette.text.secondary,
+                opacity: 0.5,
+              }}
+            />
+            <Box
+              sx={{
+                color: theme.palette.text.secondary,
+                textAlign: "center",
+                fontSize: "0.875rem",
+                opacity: 0.85,
+                maxWidth: "80%",
+                wordBreak: "break-word",
+              }}
+            >
+              {livePolicy?.reason || "Live view is blocked by schedule"}
+            </Box>
+          </Box>
+        )}
+
         {!camera.failed &&
+          !liveBlocked &&
           !(camera as types.Camera).connected &&
           !isPictureInPicture && (
             <Box
@@ -284,7 +337,8 @@ export function LivePlayer({
             transition: "transform 0.3s ease-in-out",
             // Hide video element when camera is disconnected (but keep it in DOM)
             display:
-              !camera.failed && !(camera as types.Camera).connected
+              (!camera.failed && liveBlocked) ||
+              (!camera.failed && !(camera as types.Camera).connected)
                 ? "none"
                 : "block",
           }}

@@ -27,16 +27,51 @@ const cameraNameStyles: SxProps<Theme> = {
   color: "white",
 };
 
+const unknownCameraStatus: types.CameraRuntimeStatus = {
+  state: "stale",
+  label: "Status unavailable",
+  severity: "warning",
+  detail: "Camera status is temporarily unavailable",
+  live: {
+    available: false,
+    reachable: false,
+    blocked: false,
+    reason: null,
+  },
+  recording: {
+    active: false,
+    blocked: false,
+    reason: null,
+    state: "stale",
+  },
+  last_frame_age: null,
+  latest_segment_age: null,
+  stale_frame: {
+    stale: true,
+    threshold: 0,
+    age: null,
+  },
+};
+
+function cameraStatus(camera: types.Camera) {
+  return camera.status ?? unknownCameraStatus;
+}
+
 function StatusIcon({ camera }: { camera: types.Camera }) {
+  const status = cameraStatus(camera);
+  const statusColor = {
+    default: "white",
+    info: "white",
+    success: camera.is_recording ? "red" : "green",
+    warning: "orange",
+    error: "gray",
+  }[status.severity];
+
   return camera.is_on ? (
     <CircleFill
       size={12}
       style={{
-        color: camera.is_recording
-          ? "red"
-          : camera.connected
-            ? "green"
-            : "gray",
+        color: statusColor,
         marginLeft: "4px",
       }}
     />
@@ -64,14 +99,9 @@ export function CameraNameOverlay({
   let statusText = null;
   if (camera.failed) {
     statusText = "Camera error";
-  } else if (camera.is_recording) {
-    statusText = "Recording";
-  } else if (!camera.is_on) {
-    statusText = "Camera is off";
-  } else if (!camera.connected) {
-    statusText = "Disconnected";
   } else {
-    statusText = null;
+    const status = cameraStatus(camera);
+    statusText = status.state === "connected" ? null : status.label;
   }
 
   return (

@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import logging
-from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 
-import requests
 import voluptuous as vol
 from ruamel.yaml import YAML
 
@@ -57,19 +55,14 @@ class Go2RTC:
 
     def configured_cameras(self) -> list[str]:
         """Return a list of configured cameras."""
-        try:
-            response = requests.get("http://localhost:1984/api/streams", timeout=5)
-            response.raise_for_status()
-        except requests.RequestException:
-            LOGGER.exception("Failed to fetch cameras from go2rtc")
-            return []
-
-        cameras = response.json()
-        return list(cameras)
+        return list(self._config[COMPONENT].get("streams", {}))
 
     def restart(self) -> None:
         """Restart go2rtc."""
         LOGGER.debug("Restarting go2rtc")
+        import requests
+        from http import HTTPStatus
+
         try:
             response = requests.post("http://localhost:1984/api/restart", timeout=5)
         except requests.RequestException:

@@ -14,9 +14,13 @@ import imutils
 import numpy as np
 import voluptuous as vol
 
-from viseron.components.nvr.nvr import OperationState
 from viseron.components.storage.models import TriggerTypes
 from viseron.components.webserver.api.handlers import BaseAPIHandler
+from viseron.components.webserver.auth import Role
+from viseron.components.webserver.const import (
+    CAMERA_PERMISSION_MANUAL_RECORD,
+    CAMERA_PERMISSION_VIEW_LIVE,
+)
 from viseron.domains.camera.const import (
     AUTHENTICATION_BASIC,
     AUTHENTICATION_DIGEST,
@@ -75,6 +79,14 @@ class CameraAPIHandler(BaseAPIHandler):
             "path_pattern": r"/camera/(?P<camera_identifier>[A-Za-z0-9_]+)/stop",
             "supported_methods": ["POST"],
             "method": "post_stop_camera",
+        },
+        {
+            "path_pattern": (
+                r"/camera/(?P<camera_identifier>[A-Za-z0-9_]+)/reconnect"
+            ),
+            "supported_methods": ["POST"],
+            "method": "post_reconnect_camera",
+            "requires_role": [Role.ADMIN, Role.WRITE],
         },
         {
             "path_pattern": (
@@ -175,6 +187,25 @@ class CameraAPIHandler(BaseAPIHandler):
             )
             return
 
+        decision = self._webserver.camera_policy.decision(
+            camera_identifier,
+            "live",
+            allow_override=True,
+        )
+        if not decision.allowed:
+            self.response_error(
+                HTTPStatus.FORBIDDEN,
+                reason=decision.reason or "Live view blocked by schedule",
+            )
+            return
+
+        if not self.has_camera_permission(camera_identifier, CAMERA_PERMISSION_VIEW_LIVE):
+            self.response_error(
+                HTTPStatus.FORBIDDEN,
+                reason="Missing live view permission",
+            )
+            return
+
         jpg = None
         try:
             if camera.still_image_configured:
@@ -215,7 +246,11 @@ class CameraAPIHandler(BaseAPIHandler):
             )
             return
 
-        await self.response_success(response=camera.as_dict())
+        await self.response_success(
+            response=camera.as_dict(
+                allow_policy_override=True,
+            )
+        )
         return
 
     async def post_start_camera(self, camera_identifier: str) -> None:
@@ -270,8 +305,45 @@ class CameraAPIHandler(BaseAPIHandler):
         await self.response_success()
         return
 
+    async def post_reconnect_camera(self, camera_identifier: str) -> None:
+        """Reconnect camera."""
+        camera = self._get_camera(camera_identifier, failed=False)
+        if not camera:
+            self.response_error(
+                HTTPStatus.NOT_FOUND,
+                reason=f"Camera {camera_identifier} not found",
+            )
+            return
+
+        nvr = self.get_nvr(camera_identifier)
+        if not nvr:
+            self.response_error(
+                HTTPStatus.NOT_FOUND,
+                reason=f"NVR for camera {camera_identifier} not found",
+            )
+            return
+
+        await self.run_in_executor(camera.reconnect_camera)
+        await self.response_success(
+            response={
+                "success": True,
+                "camera_identifier": camera_identifier,
+                "status": camera.as_dict(allow_policy_override=True)["status"],
+            }
+        )
+        return
+
     async def post_manual_recording(self, camera_identifier: str) -> None:
         """Start/stop manual recording."""
+        if not self.has_camera_permission(
+            camera_identifier, CAMERA_PERMISSION_MANUAL_RECORD
+        ):
+            self.response_error(
+                HTTPStatus.FORBIDDEN,
+                reason="Missing manual recording permission",
+            )
+            return None
+
         camera = self._get_camera(camera_identifier, failed=False)
         if not camera:
             self.response_error(
@@ -295,12 +367,18 @@ class CameraAPIHandler(BaseAPIHandler):
             )
             return None
 
-        if nvr.operation_state == OperationState.IDLE:
-            self.response_error(
-                HTTPStatus.BAD_REQUEST,
-                reason="NVR is idle",
+        if self.json_body["action"] == "start":
+            decision = self._webserver.camera_policy.decision(
+                camera_identifier,
+                "recording",
+                allow_override=True,
             )
-            return None
+            if not decision.allowed:
+                self.response_error(
+                    HTTPStatus.FORBIDDEN,
+                    reason=decision.reason or "Recording blocked by schedule",
+                )
+                return None
 
         async def wait_for_recording_start(timeout: int = 5) -> bool:
             """Wait for recording to start."""

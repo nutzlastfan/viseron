@@ -24,6 +24,7 @@ from viseron.components.webserver.const import (
     ACCESS_TOKEN_EXPIRATION,
     AUTH_STORAGE_KEY,
     CONFIG_AUTH,
+    CONFIG_LDAP,
     CONFIG_DAYS,
     CONFIG_HOURS,
     CONFIG_MINUTES,
@@ -37,6 +38,7 @@ from viseron.helpers.storage import Storage
 
 if TYPE_CHECKING:
     from viseron import Viseron
+    from viseron.components.webserver.ldap_auth import LDAPAuthenticator, LDAPUser
 
 LOGGER = logging.getLogger(__name__)
 
@@ -201,7 +203,10 @@ class User:
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     enabled: bool = True
     assigned_cameras: list[str] | None = None
+    assigned_feeders: list[str] | None = None
+    camera_permissions: dict[str, list[str]] | None = None
     preferences: Preferences | None = None
+    auth_provider: Literal["local", "ldap"] = "local"
 
     def asdict(self) -> dict[str, Any]:
         """Convert user to dict."""
@@ -211,7 +216,10 @@ class User:
             "username": self.username,
             "role": self.role.value,
             "assigned_cameras": self.assigned_cameras,
+            "assigned_feeders": self.assigned_feeders,
+            "camera_permissions": self.camera_permissions,
             "preferences": self.preferences,
+            "auth_provider": self.auth_provider,
         }
 
 
@@ -258,6 +266,7 @@ class Auth:
     def __init__(self, vis: Viseron, config: dict[str, Any]) -> None:
         self._vis = vis
         self._config = config
+        self._ldap_auth: LDAPAuthenticator | None = None
         self._users: dict[str, User] | None = None
         self._refresh_tokens: dict[str, RefreshToken] | None = None
         self._access_tokens: dict[str, AccessToken] | None = None
@@ -269,6 +278,10 @@ class Auth:
         self._data_lock = Lock()
         self._user_lock = Lock()
         self._decoy_jwt_key = secrets.token_hex(64)
+        if self._config.get(CONFIG_AUTH, {}).get(CONFIG_LDAP):
+            from viseron.components.webserver.ldap_auth import LDAPAuthenticator
+
+            self._ldap_auth = LDAPAuthenticator(self._config[CONFIG_AUTH])
 
     @property
     def users(self) -> dict[str, User]:
@@ -314,6 +327,17 @@ class Auth:
             ),
         )
 
+    @property
+    def ldap_enabled(self) -> bool:
+        """Return if LDAP authentication is enabled."""
+        return bool(self._ldap_auth and self._ldap_auth.enabled)
+
+    def inspect_ldap_user(self, username: str) -> dict[str, Any]:
+        """Return effective LDAP access details for a user."""
+        if not self._ldap_auth or not self.ldap_enabled:
+            raise AuthenticationFailedError("LDAP authentication is not enabled")
+        return self._ldap_auth.inspect_user(username)
+
     def get_users(self) -> dict[str, User]:
         """Get all users."""
         return self.users
@@ -324,7 +348,9 @@ class Auth:
 
     def onboarding_complete(self) -> bool:
         """Return onboarding status."""
-        return bool(self.users or os.path.exists(self.onboarding_path()))
+        return bool(
+            self.ldap_enabled or self.users or os.path.exists(self.onboarding_path())
+        )
 
     @staticmethod
     def hash_password(password: str) -> str:
@@ -375,10 +401,49 @@ class Auth:
         Path(self.onboarding_path()).touch()
         return user
 
-    def validate_user(self, username: str, password: str) -> User:
-        """Validate username and password."""
-        username = username.strip().casefold()
-        fakepw_hash = b"$2b$12$JkLmYgiPenMkcym29yHqReoa1dkONXqy6S2OBoU6FmjLShqDn/OuS"
+    def _sync_ldap_user(self, ldap_user: LDAPUser) -> User:
+        """Create or update a local user from LDAP."""
+        with self._user_lock:
+            user = self.get_user_by_username(ldap_user.username)
+            if user is None:
+                user = User(
+                    ldap_user.name,
+                    ldap_user.username,
+                    self.hash_password(secrets.token_urlsafe(32)),
+                    ldap_user.role,
+                    enabled=True,
+                    assigned_cameras=ldap_user.assigned_cameras,
+                    assigned_feeders=ldap_user.assigned_feeders,
+                    camera_permissions=ldap_user.camera_permissions,
+                    auth_provider="ldap",
+                )
+                self.users[user.id] = user
+            else:
+                if not user.enabled:
+                    raise AuthenticationFailedError
+                user.name = ldap_user.name
+                user.auth_provider = "ldap"
+                if user.role != ldap_user.role:
+                    if user.role == Role.ADMIN and ldap_user.role != Role.ADMIN:
+                        admin_count = sum(
+                            1
+                            for _user in self.users.values()
+                            if _user.role == Role.ADMIN
+                        )
+                        if admin_count <= 1:
+                            self.save()
+                            return user
+                user.role = ldap_user.role
+                user.assigned_cameras = ldap_user.assigned_cameras
+                user.assigned_feeders = ldap_user.assigned_feeders
+                user.camera_permissions = ldap_user.camera_permissions
+            self.save()
+            return user
+
+    def _validate_local_user(
+        self, username: str, password: str, fakepw_hash: bytes
+    ) -> User | None:
+        """Validate a local user and return None when no local user exists."""
         user = None
 
         # Loop over all users to avoid timing attacks.
@@ -387,12 +452,33 @@ class Auth:
                 user = _user
 
         if user:
+            if not user.enabled:
+                raise AuthenticationFailedError
             if not bcrypt.checkpw(password.encode(), base64.b64decode(user.password)):
                 raise AuthenticationFailedError
             return user
 
-        # Always check a fake password to avoid timing attacks.
         bcrypt.checkpw(b"fakepw", fakepw_hash)
+        return None
+
+    def validate_user(self, username: str, password: str) -> User:
+        """Validate username and password."""
+        username = username.strip().casefold()
+        fakepw_hash = b"$2b$12$JkLmYgiPenMkcym29yHqReoa1dkONXqy6S2OBoU6FmjLShqDn/OuS"
+
+        try:
+            local_user = self._validate_local_user(username, password, fakepw_hash)
+            if local_user:
+                return local_user
+        except AuthenticationFailedError:
+            if not self.ldap_enabled:
+                raise
+
+        if self._ldap_auth and self.ldap_enabled:
+            return self._sync_ldap_user(
+                self._ldap_auth.authenticate(username, password)
+            )
+
         raise AuthenticationFailedError
 
     def get_user(self, user_id: str) -> User | None:
@@ -449,6 +535,7 @@ class Auth:
         username: str,
         role: Role,
         assigned_cameras: list[str] | None,
+        assigned_feeders: list[str] | None,
     ) -> None:
         """Update user details."""
         with self._user_lock:
@@ -481,6 +568,8 @@ class Auth:
             user.username = username.strip().casefold()
             user.role = role
             user.assigned_cameras = assigned_cameras
+            user.assigned_feeders = assigned_feeders
+            user.camera_permissions = None
             LOGGER.debug(f"Updated user {user.username}")
             self.save()
 
@@ -555,7 +644,10 @@ class Auth:
                 id=user["id"],
                 enabled=user["enabled"],
                 assigned_cameras=user.get("assigned_cameras", None),
+                assigned_feeders=user.get("assigned_feeders", None),
+                camera_permissions=user.get("camera_permissions", None),
                 preferences=preferences,
+                auth_provider=user.get("auth_provider", "local"),
             )
 
         for refresh_token in data.get("refresh_tokens", {}).values():

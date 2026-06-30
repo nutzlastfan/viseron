@@ -24,6 +24,10 @@ class VideoStream extends VideoRTC {
   oninit(): void {
     console.debug("stream.oninit");
     super.oninit();
+    if (this.video) {
+      this.video.style.objectFit = "contain";
+      this.video.style.backgroundColor = "black";
+    }
     this.dispatchEvent(new CustomEvent("init"));
   }
 

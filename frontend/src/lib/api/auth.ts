@@ -229,13 +229,14 @@ async function authUpdateUser({
   username,
   role,
   assigned_cameras,
+  assigned_feeders,
 }: types.AuthUserResponse) {
   const response = await viseronAPI.put(`/auth/user/${id}`, {
     name,
     username,
     role,
-    assigned_cameras:
-      assigned_cameras && assigned_cameras.length > 0 ? assigned_cameras : null,
+    assigned_cameras: assigned_cameras === null ? null : assigned_cameras,
+    assigned_feeders: assigned_feeders === null ? null : assigned_feeders,
   });
   return response.data;
 }

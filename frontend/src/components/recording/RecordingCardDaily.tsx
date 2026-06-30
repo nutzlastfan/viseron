@@ -19,6 +19,7 @@ import { Link } from "react-router-dom";
 import MutationIconButton from "components/buttons/MutationIconButton";
 import { getVideoElement } from "components/player/utils";
 import VideoPlayerPlaceholder from "components/player/videoplayer/VideoPlayerPlaceholder";
+import ExportRecordingButton from "components/recording/ExportRecordingButton";
 import { useAuthContext } from "context/AuthContext";
 import { useDeleteRecording } from "lib/api/recordings";
 import { objHasValues } from "lib/helpers";
@@ -120,6 +121,12 @@ export default function RecordingCardDaily({
             <Typography variant="body2">No recordings found</Typography>
           )}
           <Stack direction="row" spacing={1}>
+            <ExportRecordingButton
+              cameraIdentifier={camera.identifier}
+              disabled={!objHasValues(recording)}
+              recordingId={recording?.id}
+              tooltip="Export latest video"
+            />
             <Tooltip title="View All Videos">
               <span>
                 <IconButton

@@ -717,6 +717,8 @@ export class Connection {
   async exportRecording(
     camera_identifier: string,
     recording_id: number,
+    zoom_pan_transform: types.ZoomPanTransform | undefined,
+    export_destination: types.ExportDestination,
     callback: (message: any) => void,
     errorCallback: (message: types.WebSocketSubscriptionErrorResponse) => void,
   ) {
@@ -731,7 +733,12 @@ export class Connection {
 
     await this.serverControlledSubscribe(
       callback,
-      messages.exportRecording(camera_identifier, recording_id),
+      messages.exportRecording(
+        camera_identifier,
+        recording_id,
+        zoom_pan_transform,
+        export_destination,
+      ),
       errorCallback,
     );
   }
@@ -740,6 +747,7 @@ export class Connection {
     event_type: string,
     camera_identifier: string,
     snapshot_id: number,
+    export_destination: types.ExportDestination,
     callback: (message: any) => void,
     errorCallback: (message: types.WebSocketSubscriptionErrorResponse) => void,
   ) {
@@ -754,7 +762,12 @@ export class Connection {
 
     await this.serverControlledSubscribe(
       callback,
-      messages.exportSnapshot(event_type, camera_identifier, snapshot_id),
+      messages.exportSnapshot(
+        event_type,
+        camera_identifier,
+        snapshot_id,
+        export_destination,
+      ),
       errorCallback,
     );
   }
@@ -763,6 +776,8 @@ export class Connection {
     camera_identifier: string,
     start: number,
     end: number,
+    zoom_pan_transform: types.ZoomPanTransform | undefined,
+    export_destination: types.ExportDestination,
     callback: (message: any) => void,
     errorCallback: (message: types.WebSocketSubscriptionErrorResponse) => void,
   ) {
@@ -777,7 +792,13 @@ export class Connection {
 
     await this.serverControlledSubscribe(
       callback,
-      messages.exportTimespan(camera_identifier, start, end),
+      messages.exportTimespan(
+        camera_identifier,
+        start,
+        end,
+        zoom_pan_transform,
+        export_destination,
+      ),
       errorCallback,
     );
   }

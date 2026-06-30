@@ -35,7 +35,7 @@ from viseron.domains.camera.const import (
     MP4BOX_PATH,
 )
 from viseron.events import EventEmptyData
-from viseron.helpers import get_utc_offset
+from viseron.helpers import create_directory, get_utc_offset
 from viseron.helpers.child_process_worker import ChildProcessWorker
 from viseron.helpers.logs import LogPipe
 
@@ -556,7 +556,9 @@ class Fragmenter:
     ) -> str | Literal[False]:
         """Concatenate fragments into a single mp4 file."""
         file_uuid = str(uuid.uuid4())
-        filename = os.path.join(TEMP_DIR, f"{file_uuid}.mp4")
+        export_temp_path = "/segments/.viseron_exports/tmp"
+        create_directory(export_temp_path)
+        filename = os.path.join(export_temp_path, f"{file_uuid}.mp4")
 
         playlist = generate_playlist(
             fragments,

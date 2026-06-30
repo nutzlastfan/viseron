@@ -15,6 +15,7 @@ import voluptuous as vol
 from tornado.routing import PathMatches
 
 from viseron.components.webserver.auth import Auth
+from viseron.components.webserver.camera_policy import CameraPolicyStore
 from viseron.components.webserver.rate_limit import RateLimiter
 from viseron.const import DEFAULT_PORT, VISERON_SIGNAL_SHUTDOWN
 from viseron.exceptions import ComponentNotReady
@@ -26,11 +27,24 @@ from .api import APIRouter
 from .const import (
     COMPONENT,
     CONFIG_AUTH,
+    CONFIG_ADMIN_GROUPS,
+    CONFIG_BIND_DN,
+    CONFIG_BIND_PASSWORD,
+    CONFIG_CAMERA_GROUPS,
+    CONFIG_CAMERAS,
     CONFIG_DAYS,
     CONFIG_DEBUG,
+    CONFIG_DEFAULT_ROLE,
+    CONFIG_ENABLED,
+    CONFIG_GROUP_BASE_DN,
+    CONFIG_GROUP_FILTER,
+    CONFIG_GROUPS,
     CONFIG_HOURS,
+    CONFIG_LDAP,
+    CONFIG_LDAP_CAMERA_ACCESS,
     CONFIG_MAX_ATTEMPTS,
     CONFIG_MINUTES,
+    CONFIG_NAME_ATTRIBUTE,
     CONFIG_PORT,
     CONFIG_PUBLIC_BASE_URL,
     CONFIG_PUBLIC_URL_EXPIRY_HOURS,
@@ -39,11 +53,22 @@ from .const import (
     CONFIG_RATE_LIMIT_ONBOARDING,
     CONFIG_RATE_LIMIT_TOKEN,
     CONFIG_RATE_LIMITS,
+    CONFIG_READ_GROUPS,
     CONFIG_SESSION_EXPIRY,
     CONFIG_SUBPATH,
+    CONFIG_URL,
+    CONFIG_USER_BASE_DN,
+    CONFIG_USER_FILTER,
+    CONFIG_USERNAME_ATTRIBUTE,
     CONFIG_WINDOW_SECONDS,
+    CONFIG_WRITE_GROUPS,
     DEFAULT_COMPONENT,
     DEFAULT_DEBUG,
+    DEFAULT_LDAP_DEFAULT_ROLE,
+    DEFAULT_LDAP_GROUP_FILTER,
+    DEFAULT_LDAP_NAME_ATTRIBUTE,
+    DEFAULT_LDAP_USER_FILTER,
+    DEFAULT_LDAP_USERNAME_ATTRIBUTE,
     DEFAULT_PUBLIC_URL_EXPIRY_HOURS,
     DEFAULT_PUBLIC_URL_MAX_DOWNLOADS,
     DEFAULT_RATE_LIMIT_LOGIN,
@@ -52,12 +77,23 @@ from .const import (
     DEFAULT_SESSION_EXPIRY,
     DEFAULT_SUBPATH,
     DESC_AUTH,
+    DESC_ADMIN_GROUPS,
+    DESC_BIND_DN,
+    DESC_BIND_PASSWORD,
+    DESC_CAMERA_GROUPS,
     DESC_COMPONENT,
     DESC_DAYS,
     DESC_DEBUG,
+    DESC_DEFAULT_ROLE,
+    DESC_ENABLED,
+    DESC_GROUP_BASE_DN,
+    DESC_GROUP_FILTER,
     DESC_HOURS,
+    DESC_LDAP,
+    DESC_LDAP_CAMERA_ACCESS,
     DESC_MAX_ATTEMPTS,
     DESC_MINUTES,
+    DESC_NAME_ATTRIBUTE,
     DESC_PORT,
     DESC_PUBLIC_BASE_URL,
     DESC_PUBLIC_URL_EXPIRY_HOURS,
@@ -66,9 +102,15 @@ from .const import (
     DESC_RATE_LIMIT_ONBOARDING,
     DESC_RATE_LIMIT_TOKEN,
     DESC_RATE_LIMITS,
+    DESC_READ_GROUPS,
     DESC_SESSION_EXPIRY,
     DESC_SUBPATH,
+    DESC_URL,
+    DESC_USER_BASE_DN,
+    DESC_USER_FILTER,
+    DESC_USERNAME_ATTRIBUTE,
     DESC_WINDOW_SECONDS,
+    DESC_WRITE_GROUPS,
     DOWNLOAD_TOKENS,
     PUBLIC_IMAGE_TOKENS,
     PUBLIC_IMAGES_PATH,
@@ -127,6 +169,33 @@ def _rate_limit_schema(default: dict[str, Any]) -> Any:
     )
 
 
+CAMERA_GROUP_SCHEMA = vol.Schema(
+    {
+        vol.Required("name"): str,
+        vol.Optional(CONFIG_CAMERAS, default=[]): [str],
+    },
+    extra=vol.ALLOW_EXTRA,
+)
+
+LDAP_CAMERA_ACCESS_SCHEMA = vol.Schema(
+    {
+        vol.Required(CONFIG_GROUPS): [str],
+        vol.Optional(CONFIG_CAMERA_GROUPS, default=[]): [str],
+        vol.Optional(CONFIG_CAMERAS, default=[]): [str],
+    },
+    extra=vol.ALLOW_EXTRA,
+)
+
+SITE_SCHEMA = vol.Schema(
+    {
+        vol.Optional("read_only", default=False): bool,
+        vol.Optional("feeders", default={}): dict,
+        vol.Optional("rooms", default={}): dict,
+    },
+    extra=vol.ALLOW_EXTRA,
+)
+
+
 CONFIG_SCHEMA = vol.Schema(
     {
         vol.Required(
@@ -157,6 +226,9 @@ CONFIG_SCHEMA = vol.Schema(
                     description=DESC_PUBLIC_URL_MAX_DOWNLOADS,
                     default=DEFAULT_PUBLIC_URL_MAX_DOWNLOADS,
                 ): vol.All(vol.Coerce(int), vol.Range(min=0)),
+                vol.Optional("site", default={}): vol.All(
+                    CoerceNoneToDict(), SITE_SCHEMA
+                ),
                 vol.Optional(CONFIG_AUTH, description=DESC_AUTH): vol.All(
                     CoerceNoneToDict(),
                     {
@@ -202,6 +274,89 @@ CONFIG_SCHEMA = vol.Schema(
                                     default=DEFAULT_RATE_LIMIT_ONBOARDING,
                                     description=DESC_RATE_LIMIT_ONBOARDING,
                                 ): _rate_limit_schema(DEFAULT_RATE_LIMIT_ONBOARDING),
+                            },
+                        ),
+                        vol.Optional(
+                            CONFIG_CAMERA_GROUPS,
+                            default={},
+                            description=DESC_CAMERA_GROUPS,
+                        ): {str: CAMERA_GROUP_SCHEMA},
+                        vol.Optional(
+                            CONFIG_LDAP_CAMERA_ACCESS,
+                            default=[],
+                            description=DESC_LDAP_CAMERA_ACCESS,
+                        ): [LDAP_CAMERA_ACCESS_SCHEMA],
+                        vol.Optional(CONFIG_LDAP, description=DESC_LDAP): vol.All(
+                            CoerceNoneToDict(),
+                            {
+                                vol.Optional(
+                                    CONFIG_ENABLED,
+                                    default=True,
+                                    description=DESC_ENABLED,
+                                ): bool,
+                                vol.Required(
+                                    CONFIG_URL,
+                                    description=DESC_URL,
+                                ): str,
+                                vol.Optional(
+                                    CONFIG_BIND_DN,
+                                    default=None,
+                                    description=DESC_BIND_DN,
+                                ): vol.Maybe(str),
+                                vol.Optional(
+                                    CONFIG_BIND_PASSWORD,
+                                    default=None,
+                                    description=DESC_BIND_PASSWORD,
+                                ): vol.Maybe(str),
+                                vol.Required(
+                                    CONFIG_USER_BASE_DN,
+                                    description=DESC_USER_BASE_DN,
+                                ): str,
+                                vol.Optional(
+                                    CONFIG_USER_FILTER,
+                                    default=DEFAULT_LDAP_USER_FILTER,
+                                    description=DESC_USER_FILTER,
+                                ): str,
+                                vol.Optional(
+                                    CONFIG_USERNAME_ATTRIBUTE,
+                                    default=DEFAULT_LDAP_USERNAME_ATTRIBUTE,
+                                    description=DESC_USERNAME_ATTRIBUTE,
+                                ): str,
+                                vol.Optional(
+                                    CONFIG_NAME_ATTRIBUTE,
+                                    default=DEFAULT_LDAP_NAME_ATTRIBUTE,
+                                    description=DESC_NAME_ATTRIBUTE,
+                                ): str,
+                                vol.Optional(
+                                    CONFIG_GROUP_BASE_DN,
+                                    default=None,
+                                    description=DESC_GROUP_BASE_DN,
+                                ): vol.Maybe(str),
+                                vol.Optional(
+                                    CONFIG_GROUP_FILTER,
+                                    default=DEFAULT_LDAP_GROUP_FILTER,
+                                    description=DESC_GROUP_FILTER,
+                                ): str,
+                                vol.Optional(
+                                    CONFIG_ADMIN_GROUPS,
+                                    default=[],
+                                    description=DESC_ADMIN_GROUPS,
+                                ): [str],
+                                vol.Optional(
+                                    CONFIG_WRITE_GROUPS,
+                                    default=[],
+                                    description=DESC_WRITE_GROUPS,
+                                ): [str],
+                                vol.Optional(
+                                    CONFIG_READ_GROUPS,
+                                    default=[],
+                                    description=DESC_READ_GROUPS,
+                                ): [str],
+                                vol.Optional(
+                                    CONFIG_DEFAULT_ROLE,
+                                    default=DEFAULT_LDAP_DEFAULT_ROLE,
+                                    description=DESC_DEFAULT_ROLE,
+                                ): vol.In(["admin", "read", "write", "deny"]),
                             },
                         ),
                     },
@@ -317,6 +472,7 @@ class Webserver(threading.Thread):
         if self._config.get(CONFIG_AUTH, False):
             self._auth = Auth(vis, config)
         self._store = WebserverStore(vis)
+        self._camera_policy = CameraPolicyStore(self._config.get(CONFIG_AUTH) or {})
         self._subpath = self._normalize_subpath(config.get(CONFIG_SUBPATH))
 
         # Rate limiters for auth-sensitive endpoints.
@@ -440,6 +596,16 @@ class Webserver(threading.Thread):
     def rate_limiters(self) -> dict[str, RateLimiter]:
         """Return rate limiters keyed by bucket name."""
         return self._rate_limiters
+
+    @property
+    def camera_policy(self) -> CameraPolicyStore:
+        """Return camera policy store."""
+        return self._camera_policy
+
+    @property
+    def config(self) -> dict[str, Any]:
+        """Return webserver configuration."""
+        return self._config
 
     @property
     def application(self) -> tornado.web.Application:

@@ -1,10 +1,14 @@
 import {
   ArrowRight,
   DataBlob,
+  Dashboard,
+  Download,
   Script,
   SettingsEdit,
+  Time,
   Trigger,
   UserMultiple,
+  Video,
 } from "@carbon/icons-react";
 import { ListItemButton } from "@mui/material";
 import Avatar from "@mui/material/Avatar";
@@ -38,6 +42,15 @@ function Settings() {
       disabledReason: null,
     },
     {
+      name: "Cameras",
+      description: "Add and review cameras",
+      path: "/settings/cameras",
+      icon: <Video size={23} />,
+      color: "indigo",
+      disabled: false,
+      disabledReason: null,
+    },
+    {
       name: "User Management",
       description: "Create, edit, and delete users",
       path: "/settings/users",
@@ -47,6 +60,80 @@ function Settings() {
       disabledReason: !auth.enabled
         ? "Enable authentication to manage users"
         : "Only admins can manage users",
+    },
+    {
+      name: "LDAP / Active Directory",
+      description: "Configure directory authentication",
+      path: "/settings/ldap",
+      icon: <UserMultiple size={23} />,
+      color: "indigo",
+      disabled: !auth.enabled || user?.role !== "admin",
+      disabledReason: !auth.enabled
+        ? "Enable authentication to configure LDAP"
+        : "Only admins can configure LDAP",
+    },
+    {
+      name: "Camera Access",
+      description: "Map users and directory groups to cameras",
+      path: "/settings/camera-access",
+      icon: <Video size={23} />,
+      color: "teal",
+      disabled: !auth.enabled || user?.role !== "admin",
+      disabledReason: !auth.enabled
+        ? "Enable authentication to configure camera access"
+        : "Only admins can configure camera access",
+    },
+    {
+      name: "Recording Schedule",
+      description: "Configure NVR recording windows",
+      path: "/settings/recording-schedule",
+      icon: <Time size={23} />,
+      color: "purple",
+      disabled:
+        auth.enabled && user?.role !== "admin" && user?.role !== "write",
+      disabledReason: !auth.enabled
+        ? null
+        : "Only admins and write users can configure recording schedules",
+    },
+    {
+      name: "Feeders",
+      description: "Review Koser Stall feeding stations",
+      path: "/feeders",
+      icon: <DataBlob size={23} />,
+      color: "green",
+      disabled: false,
+      disabledReason: null,
+    },
+    {
+      name: "Export Destinations",
+      description: "Configure browser and server-side export targets",
+      path: "/settings/export-destinations",
+      icon: <Download size={23} />,
+      color: "blue",
+      disabled: !auth.enabled || user?.role !== "admin",
+      disabledReason: !auth.enabled
+        ? "Enable authentication to configure export destinations"
+        : "Only admins can configure export destinations",
+    },
+    {
+      name: "System Health",
+      description: "Review server load, storage, streams, and camera health",
+      path: "/settings/system-health",
+      icon: <Dashboard size={23} />,
+      color: "blue",
+      disabled: false,
+      disabledReason: null,
+    },
+    {
+      name: "iMouse Control",
+      description: "Control Raspberry camera focus, exposure, gain, HDR, and lights",
+      path: "/settings/imouse",
+      icon: <Video size={23} />,
+      color: "teal",
+      disabled: !auth.enabled || user?.role !== "admin",
+      disabledReason: !auth.enabled
+        ? "Enable authentication to control iMouse cameras"
+        : "Only admins can control iMouse cameras",
     },
     {
       name: "System Events",

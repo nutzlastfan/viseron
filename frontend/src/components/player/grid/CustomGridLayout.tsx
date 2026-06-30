@@ -20,6 +20,7 @@ interface CustomGridLayoutProps {
   renderPlayer: (
     camera: types.Camera | types.FailedCamera,
     playerRef: React.RefObject<any>,
+    active: boolean,
   ) => React.ReactElement;
 }
 
@@ -38,6 +39,7 @@ function CameraPlayerItem({
   renderPlayer: (
     camera: types.Camera | types.FailedCamera,
     playerRef: React.RefObject<any>,
+    active: boolean,
   ) => React.ReactElement;
 }) {
   // Each camera gets its own ref - this prevents stale ref issues
@@ -67,7 +69,7 @@ function CameraPlayerItem({
         },
       }}
     >
-      {renderPlayer(camera, playerRef)}
+      {renderPlayer(camera, playerRef, true)}
     </Box>
   );
 }

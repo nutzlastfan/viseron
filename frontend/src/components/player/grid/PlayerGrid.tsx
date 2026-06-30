@@ -9,6 +9,7 @@ import {
   setPlayerSize,
   useGridLayout,
 } from "components/player/grid/utils";
+import useOnScreen from "hooks/UseOnScreen";
 import * as types from "lib/types";
 
 type PlayerItemProps = {
@@ -18,6 +19,7 @@ type PlayerItemProps = {
   renderPlayer: (
     camera: types.Camera | types.FailedCamera,
     playerRef: React.RefObject<any>,
+    active: boolean,
   ) => JSX.Element;
   forceBreakpoint?: boolean;
 };
@@ -32,6 +34,7 @@ const PlayerItem = forwardRef<PlayerItemRef, PlayerItemProps>(
       forceBreakpoint !== undefined ? forceBreakpoint : _smBreakpoint;
     const boxRef = useRef<HTMLDivElement>(null);
     const playerRef = useRef<any>(null);
+    const active = useOnScreen<HTMLDivElement>(boxRef as any, "160px");
 
     useImperativeHandle(ref, () => ({
       // PlayerGrid will call this function to set the size of the player.
@@ -62,7 +65,7 @@ const PlayerItem = forwardRef<PlayerItemRef, PlayerItemProps>(
             justifyContent: "center",
           }}
         >
-          {renderPlayer(camera, playerRef)}
+          {renderPlayer(camera, playerRef, active)}
         </Box>
       </Grid>
     );
@@ -79,6 +82,7 @@ type PlayerGridProps = {
   renderPlayer: (
     camera: types.Camera | types.FailedCamera,
     playerRef: React.RefObject<any>,
+    active: boolean,
   ) => JSX.Element;
   forceBreakpoint?: boolean;
   useDoubleColumnMobile?: boolean;

@@ -10,11 +10,12 @@ import logging
 import os
 import shutil
 import signal
+import subprocess as sp
 import time
 import uuid
 from collections.abc import Callable
 from functools import wraps
-from typing import TYPE_CHECKING, Any, overload
+from typing import TYPE_CHECKING, Any, Literal, overload
 
 import voluptuous as vol
 from debouncer import DebounceOptions, debounce
@@ -45,8 +46,14 @@ from viseron.components.webserver.const import (
     WS_ERROR_RELOAD_CONFIG_FAILED,
     WS_ERROR_SAVE_CONFIG_FAILED,
 )
+from viseron.components.webserver.config_backup import backup_config
 from viseron.components.webserver.download_token import DownloadToken
-from viseron.const import CONFIG_PATH, EVENT_STATE_CHANGED, RESTART_EXIT_CODE
+from viseron.const import (
+    CONFIG_PATH,
+    EVENT_STATE_CHANGED,
+    RESTART_EXIT_CODE,
+)
+from viseron.domains.camera.const import CONFIG_FFMPEG_LOGLEVEL, CONFIG_RECORDER
 from viseron.domains.camera.fragmenter import (
     Fragment,
     Timespan,
@@ -75,6 +82,330 @@ if TYPE_CHECKING:
     from . import WebSocketHandler
 
 LOGGER = logging.getLogger(__name__)
+
+ZOOM_PAN_TRANSFORM_SCHEMA = vol.Schema(
+    {
+        vol.Required("scale"): vol.All(vol.Coerce(float), vol.Range(min=1.0)),
+        vol.Required("centerX"): vol.All(
+            vol.Coerce(float), vol.Range(min=0.0, max=1.0)
+        ),
+        vol.Required("centerY"): vol.All(
+            vol.Coerce(float), vol.Range(min=0.0, max=1.0)
+        ),
+        vol.Optional("viewportAspectRatio", default=None): vol.Maybe(
+            vol.All(vol.Coerce(float), vol.Range(min=0.1, max=10.0))
+        ),
+        vol.Optional("flip", default=False): bool,
+    },
+    extra=False,
+)
+
+
+def _even(value: int) -> int:
+    """Return the nearest lower even integer."""
+    return value - (value % 2)
+
+
+def _even_at_least(value: float, minimum: int = 2) -> int:
+    """Return an even integer no smaller than minimum."""
+    return max(minimum, _even(round(value)))
+
+
+def _video_resolution(
+    video_path: str,
+    fallback_resolution: tuple[int, int],
+) -> tuple[int, int]:
+    """Return video resolution from ffprobe, falling back to camera metadata."""
+    try:
+        result = sp.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height",
+                "-of",
+                "csv=s=x:p=0",
+                video_path,
+            ],
+            stdout=sp.PIPE,
+            stderr=sp.PIPE,
+            text=True,
+            check=True,
+        )
+        width, height = result.stdout.strip().split("x", 1)
+        parsed_resolution = (int(width), int(height))
+        if parsed_resolution[0] > 0 and parsed_resolution[1] > 0:
+            return parsed_resolution
+    except (ValueError, sp.CalledProcessError, OSError):
+        LOGGER.debug("Failed to probe export video resolution", exc_info=True)
+    return fallback_resolution
+
+
+def _zoom_pan_video_filter(
+    source_width: int,
+    source_height: int,
+    fallback_viewport_aspect_ratio: float,
+    zoom_pan_transform: dict[str, float | bool] | None,
+) -> str | None:
+    """Build an FFmpeg crop/scale filter from a normalized zoom/pan transform."""
+    if not zoom_pan_transform:
+        return None
+
+    if source_width <= 0 or source_height <= 0:
+        return None
+
+    scale = float(zoom_pan_transform["scale"])
+    flip = bool(zoom_pan_transform.get("flip", False))
+    if scale <= 1 and not flip:
+        return None
+    if scale <= 1:
+        return "hflip,vflip"
+
+    source_aspect_ratio = source_width / source_height
+    viewport_aspect_ratio = float(
+        zoom_pan_transform.get("viewportAspectRatio")
+        or fallback_viewport_aspect_ratio
+        or source_aspect_ratio
+    )
+    uses_legacy_container_coordinates = (
+        zoom_pan_transform.get("viewportAspectRatio") is None
+    )
+
+    if viewport_aspect_ratio >= source_aspect_ratio:
+        crop_height = _even_at_least(source_height / scale)
+        crop_width = _even_at_least(crop_height * viewport_aspect_ratio)
+        if crop_width > source_width:
+            crop_width = _even(source_width)
+            crop_height = _even_at_least(crop_width / viewport_aspect_ratio)
+    else:
+        crop_width = _even_at_least(source_width / scale)
+        crop_height = _even_at_least(crop_width / viewport_aspect_ratio)
+        if crop_height > source_height:
+            crop_height = _even(source_height)
+            crop_width = _even_at_least(crop_height * viewport_aspect_ratio)
+
+    crop_width = max(2, min(source_width, crop_width))
+    crop_height = max(2, min(source_height, crop_height))
+
+    center_x = float(zoom_pan_transform["centerX"])
+    center_y = float(zoom_pan_transform["centerY"])
+    if uses_legacy_container_coordinates:
+        if source_aspect_ratio >= viewport_aspect_ratio:
+            content_width = 1.0
+            content_height = viewport_aspect_ratio / source_aspect_ratio
+            content_left = 0.0
+            content_top = (1.0 - content_height) / 2.0
+        else:
+            content_width = source_aspect_ratio / viewport_aspect_ratio
+            content_height = 1.0
+            content_left = (1.0 - content_width) / 2.0
+            content_top = 0.0
+        center_x = (center_x - content_left) / content_width
+        center_y = (center_y - content_top) / content_height
+
+    center_x = max(0.0, min(1.0, center_x))
+    center_y = max(0.0, min(1.0, center_y))
+    if flip:
+        center_x = 1 - center_x
+        center_y = 1 - center_y
+
+    max_x = max(0, source_width - crop_width)
+    max_y = max(0, source_height - crop_height)
+    crop_x = round(center_x * source_width - crop_width / 2)
+    crop_y = round(center_y * source_height - crop_height / 2)
+    crop_x = _even(max(0, min(max_x, crop_x)))
+    crop_y = _even(max(0, min(max_y, crop_y)))
+
+    filters = [f"crop={crop_width}:{crop_height}:{crop_x}:{crop_y}"]
+    if flip:
+        filters.extend(["hflip", "vflip"])
+    filters.append("setsar=1")
+
+    return ",".join(filters)
+
+
+EXPORT_TEMP_PATH = "/segments/.viseron_exports/tmp"
+EXPORT_CLEANUP_MAX_AGE_SECONDS = 48 * 60 * 60
+EXPORT_CLEANUP_INTERVAL_SECONDS = 60 * 60
+_last_export_cleanup = 0.0
+
+
+def _cleanup_export_buffers() -> None:
+    """Remove stale export buffers that were never downloaded."""
+    global _last_export_cleanup  # pylint: disable=global-statement
+    now = time.time()
+    if now - _last_export_cleanup < EXPORT_CLEANUP_INTERVAL_SECONDS:
+        return
+    _last_export_cleanup = now
+
+    cutoff = now - EXPORT_CLEANUP_MAX_AGE_SECONDS
+    for directory in (EXPORT_TEMP_PATH, DOWNLOAD_PATH):
+        create_directory(directory)
+        for entry in os.scandir(directory):
+            if not entry.is_file():
+                continue
+            try:
+                if entry.stat().st_mtime >= cutoff:
+                    continue
+                os.remove(entry.path)
+                LOGGER.info("Removed stale export buffer %s", entry.path)
+            except OSError:
+                LOGGER.debug("Failed to remove stale export buffer", exc_info=True)
+
+
+def _configured_export_destinations(connection: WebSocketHandler) -> dict[str, dict]:
+    """Return configured non-browser export destinations."""
+    site_config = connection.webserver.config.get("site", {})
+    destinations = site_config.get("export_destinations", {})
+    return destinations if isinstance(destinations, dict) else {}
+
+
+def _safe_export_filename(filename: str) -> str:
+    """Return a filename that cannot escape the configured destination."""
+    return os.path.basename(filename).replace(os.sep, "_")
+
+
+def _server_export_destination(
+    connection: WebSocketHandler,
+    destination_id: str,
+) -> dict | None:
+    """Resolve a server-side export destination from config."""
+    if destination_id == "browser":
+        return None
+    destination = _configured_export_destinations(connection).get(destination_id)
+    if not isinstance(destination, dict) or not isinstance(destination.get("path"), str):
+        return None
+    if not destination.get("enabled", True):
+        return None
+    return destination
+
+
+def _finalize_export(
+    connection: WebSocketHandler,
+    message: dict[str, Any],
+    source_path: str,
+    filename: str,
+    *,
+    move_source: bool,
+) -> dict[str, Any] | str:
+    """Move/copy an export to browser-download storage or a server destination."""
+    destination_id = message.get("export_destination", "browser")
+    if destination_id == "browser":
+        create_directory(DOWNLOAD_PATH)
+        new_path = os.path.join(DOWNLOAD_PATH, _safe_export_filename(filename))
+        if move_source:
+            shutil.move(source_path, new_path)
+        else:
+            shutil.copy2(source_path, new_path)
+
+        download_token = DownloadToken(
+            filename=new_path,
+            token=str(uuid.uuid4()),
+            delete_after_download=True,
+        )
+        connection.webserver.download_tokens[download_token.token] = download_token
+        return {
+            "filename": download_token.filename,
+            "token": download_token.token,
+            "destination": "browser",
+        }
+
+    destination = _server_export_destination(connection, destination_id)
+    if not destination:
+        return subscription_error_message(
+            message["command_id"],
+            WS_ERROR_NOT_FOUND,
+            f"Export destination {destination_id} is not configured.",
+        )
+
+    target_dir = os.path.join(destination["path"], message["camera_identifier"])
+    create_directory(target_dir)
+    target_path = os.path.join(target_dir, _safe_export_filename(filename))
+    if move_source:
+        shutil.move(source_path, target_path)
+    else:
+        shutil.copy2(source_path, target_path)
+
+    return {
+        "filename": target_path,
+        "destination": destination_id,
+        "destination_name": destination.get("name", destination_id),
+        "downloaded": False,
+    }
+
+
+def _apply_zoom_pan_transform(
+    camera,
+    video_path: str,
+    zoom_pan_transform: dict[str, float | bool] | None,
+) -> str | Literal[False]:
+    """Create a zoomed copy of video_path if a zoom transform is configured."""
+    source_width, source_height = _video_resolution(
+        video_path, camera.mainstream_resolution
+    )
+    fallback_width, fallback_height = camera.mainstream_resolution
+    fallback_viewport_aspect_ratio = (
+        fallback_width / fallback_height if fallback_width and fallback_height else 0
+    )
+    video_filter = _zoom_pan_video_filter(
+        source_width,
+        source_height,
+        fallback_viewport_aspect_ratio,
+        zoom_pan_transform,
+    )
+    if not video_filter:
+        return video_path
+
+    _cleanup_export_buffers()
+    filename = os.path.join(EXPORT_TEMP_PATH, f"{uuid.uuid4()}.mp4")
+    ffmpeg_cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-y",
+        "-loglevel",
+        camera.config[CONFIG_RECORDER][CONFIG_FFMPEG_LOGLEVEL],
+        "-i",
+        video_path,
+        "-vf",
+        video_filter,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "18",
+        "-c:a",
+        "copy",
+        "-movflags",
+        "+faststart",
+        filename,
+    ]
+    LOGGER.info(
+        "Applying zoom/pan export filter for %s: transform=%s, filter=%s",
+        camera.identifier,
+        zoom_pan_transform,
+        video_filter,
+    )
+    LOGGER.debug(f"Zoomed export command: {' '.join(ffmpeg_cmd)}")
+    try:
+        sp.run(  # type: ignore[call-overload]
+            ffmpeg_cmd,
+            stdout=sp.PIPE,
+            stderr=sp.PIPE,
+            check=True,
+        )
+    except (sp.CalledProcessError, OSError) as err:
+        LOGGER.error("Failed to apply zoom/pan transform to export: %s", err)
+        return False
+
+    try:
+        os.remove(video_path)
+    except OSError:
+        LOGGER.debug("Failed to remove unzoomed temporary export", exc_info=True)
+    return filename
 
 
 @overload
@@ -289,6 +620,7 @@ async def save_config(connection: WebSocketHandler, message) -> None:
     """Save config to file."""
 
     def _save_config():
+        backup_config("config_editor")
         with open(CONFIG_PATH, "w", encoding="utf-8") as config_file:
             config_file.write(message["config"])
 
@@ -477,6 +809,10 @@ async def unsubscribe_timespans(connection: WebSocketHandler, message) -> None:
         vol.Required("type"): "export_recording",
         vol.Required("camera_identifier"): str,
         vol.Required("recording_id"): int,
+        vol.Optional("zoom_pan_transform", default=None): vol.Maybe(
+            ZOOM_PAN_TRANSFORM_SCHEMA
+        ),
+        vol.Optional("export_destination", default="browser"): str,
     }
 )
 async def export_recording(connection: WebSocketHandler, message) -> None:
@@ -493,6 +829,7 @@ async def export_recording(connection: WebSocketHandler, message) -> None:
         return
 
     def _result() -> dict[str, Any] | str:
+        _cleanup_export_buffers()
         with connection.get_session() as session:
             try:
                 recording = session.execute(
@@ -521,28 +858,35 @@ async def export_recording(connection: WebSocketHandler, message) -> None:
                 WS_ERROR_NOT_FOUND,
                 "No fragments found for recording.",
             )
+        recording_mp4 = _apply_zoom_pan_transform(
+            camera,
+            recording_mp4,
+            message["zoom_pan_transform"],
+        )
+        if not recording_mp4:
+            return subscription_error_message(
+                message["command_id"],
+                WS_ERROR_NOT_FOUND,
+                "Failed to apply zoom to recording.",
+            )
 
-        create_directory(DOWNLOAD_PATH)
         time_string = (recording.start_time + get_utc_offset()).strftime(
             "%Y-%m-%d-%H-%M-%S"
         )
         video_name = f"{camera.identifier}-{time_string}.{camera.extension}"
-        new_path = os.path.join(DOWNLOAD_PATH, video_name)
-        shutil.move(recording_mp4, new_path)
-
-        download_token = DownloadToken(
-            filename=new_path,
-            token=str(uuid.uuid4()),
-            delete_after_download=True,
+        export_result = _finalize_export(
+            connection,
+            message,
+            recording_mp4,
+            video_name,
+            move_source=True,
         )
-        connection.webserver.download_tokens[download_token.token] = download_token
+        if isinstance(export_result, str):
+            return export_result
 
         return subscription_result_message(
             message["command_id"],
-            {
-                "filename": download_token.filename,
-                "token": download_token.token,
-            },
+            export_result,
         )
 
     await connection.async_send_message(result_message(message["command_id"]))
@@ -567,6 +911,7 @@ class EventTypeModelEnum(enum.Enum):
         vol.Required("event_type"): str,
         vol.Required("camera_identifier"): str,
         vol.Required("snapshot_id"): int,
+        vol.Optional("export_destination", default="browser"): str,
     }
 )
 async def export_snapshot(connection: WebSocketHandler, message) -> None:
@@ -595,6 +940,7 @@ async def export_snapshot(connection: WebSocketHandler, message) -> None:
         return
 
     def _result() -> dict[str, Any] | str:
+        _cleanup_export_buffers()
         with connection.get_session() as session:
             try:
                 event = session.execute(
@@ -607,27 +953,23 @@ async def export_snapshot(connection: WebSocketHandler, message) -> None:
                     f"Snapshot with id {message['snapshot_id']} not found.",
                 )
 
-        create_directory(DOWNLOAD_PATH)
         time_string = (event.created_at + get_utc_offset()).strftime(
             "%Y-%m-%d-%H-%M-%S"
         )
         filename = f"{camera.identifier}-{time_string}.jpg"
-        new_path = os.path.join(DOWNLOAD_PATH, filename)
-        shutil.copy(event.snapshot_path, new_path)
-
-        download_token = DownloadToken(
-            filename=new_path,
-            token=str(uuid.uuid4()),
-            delete_after_download=True,
+        export_result = _finalize_export(
+            connection,
+            message,
+            event.snapshot_path,
+            filename,
+            move_source=False,
         )
-        connection.webserver.download_tokens[download_token.token] = download_token
+        if isinstance(export_result, str):
+            return export_result
 
         return subscription_result_message(
             message["command_id"],
-            {
-                "filename": download_token.filename,
-                "token": download_token.token,
-            },
+            export_result,
         )
 
     await connection.async_send_message(result_message(message["command_id"]))
@@ -643,6 +985,10 @@ async def export_snapshot(connection: WebSocketHandler, message) -> None:
         vol.Required("camera_identifier"): str,
         vol.Required("start"): int,
         vol.Required("end"): int,
+        vol.Optional("zoom_pan_transform", default=None): vol.Maybe(
+            ZOOM_PAN_TRANSFORM_SCHEMA
+        ),
+        vol.Optional("export_destination", default="browser"): str,
     }
 )
 async def export_timespan(connection: WebSocketHandler, message) -> None:
@@ -659,6 +1005,7 @@ async def export_timespan(connection: WebSocketHandler, message) -> None:
         return
 
     def _result() -> dict[str, Any] | str:
+        _cleanup_export_buffers()
         files = get_time_period_fragments(
             [camera.identifier],
             message["start"],
@@ -683,8 +1030,18 @@ async def export_timespan(connection: WebSocketHandler, message) -> None:
                 WS_ERROR_NOT_FOUND,
                 "Failed to concatenate fragments.",
             )
+        timespan_video = _apply_zoom_pan_transform(
+            camera,
+            timespan_video,
+            message["zoom_pan_transform"],
+        )
+        if not timespan_video:
+            return subscription_error_message(
+                message["command_id"],
+                WS_ERROR_NOT_FOUND,
+                "Failed to apply zoom to timespan.",
+            )
 
-        create_directory(DOWNLOAD_PATH)
         # fromtimestamp automatically converts to server timezone
         time_string = (datetime.datetime.fromtimestamp(message["start"])).strftime(
             "%Y-%m-%d-%H-%M-%S"
@@ -692,22 +1049,19 @@ async def export_timespan(connection: WebSocketHandler, message) -> None:
         video_name = (
             f"{camera.identifier}-{time_string}.{os.path.splitext(timespan_video)[1]}"
         )
-        new_path = os.path.join(DOWNLOAD_PATH, video_name)
-        shutil.move(timespan_video, new_path)
-
-        download_token = DownloadToken(
-            filename=new_path,
-            token=str(uuid.uuid4()),
-            delete_after_download=True,
+        export_result = _finalize_export(
+            connection,
+            message,
+            timespan_video,
+            video_name,
+            move_source=True,
         )
-        connection.webserver.download_tokens[download_token.token] = download_token
+        if isinstance(export_result, str):
+            return export_result
 
         return subscription_result_message(
             message["command_id"],
-            {
-                "filename": download_token.filename,
-                "token": download_token.token,
-            },
+            export_result,
         )
 
     await connection.async_send_message(result_message(message["command_id"]))

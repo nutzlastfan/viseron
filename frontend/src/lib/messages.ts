@@ -1,3 +1,5 @@
+import type { ExportDestination, ZoomPanTransform } from "lib/types";
+
 export type SubscribeEventMessage = {
   type: "subscribe_event";
   event: string;
@@ -30,18 +32,23 @@ export type ExportRecordingMessage = {
   type: "export_recording";
   camera_identifier: string;
   recording_id: number;
+  zoom_pan_transform?: ZoomPanTransform;
+  export_destination?: ExportDestination;
 };
 export type ExportSnapshotMessage = {
   type: "export_snapshot";
   event_type: string;
   camera_identifier: string;
   snapshot_id: number;
+  export_destination?: ExportDestination;
 };
 export type ExportTimespanMessage = {
   type: "export_timespan";
   camera_identifier: string;
   start: number;
   end: number;
+  zoom_pan_transform?: ZoomPanTransform;
+  export_destination?: ExportDestination;
 };
 
 export function auth(accessToken: string) {
@@ -166,38 +173,65 @@ export function unsubscribeTimespans(subscription: number) {
 export function exportRecording(
   camera_identifier: string,
   recording_id: number,
+  zoom_pan_transform?: ZoomPanTransform,
+  export_destination: ExportDestination = "browser",
 ) {
-  return {
+  const message: ExportRecordingMessage = {
     type: "export_recording",
     camera_identifier,
     recording_id,
-  } as ExportRecordingMessage;
+  };
+
+  if (zoom_pan_transform && zoom_pan_transform.scale > 1) {
+    message.zoom_pan_transform = zoom_pan_transform;
+  }
+  if (export_destination !== "browser") {
+    message.export_destination = export_destination;
+  }
+
+  return message;
 }
 
 export function exportSnapshot(
   event_type: string,
   camera_identifier: string,
   snapshot_id: number,
+  export_destination: ExportDestination = "browser",
 ) {
-  return {
+  const message: ExportSnapshotMessage = {
     type: "export_snapshot",
     event_type,
     camera_identifier,
     snapshot_id,
-  } as ExportSnapshotMessage;
+  };
+  if (export_destination !== "browser") {
+    message.export_destination = export_destination;
+  }
+  return message;
 }
 
 export function exportTimespan(
   camera_identifier: string,
   start: number,
   end: number,
+  zoom_pan_transform?: ZoomPanTransform,
+  export_destination: ExportDestination = "browser",
 ) {
-  return {
+  const message: ExportTimespanMessage = {
     type: "export_timespan",
     camera_identifier,
     start,
     end,
-  } as ExportTimespanMessage;
+  };
+
+  if (zoom_pan_transform && zoom_pan_transform.scale > 1) {
+    message.zoom_pan_transform = zoom_pan_transform;
+  }
+  if (export_destination !== "browser") {
+    message.export_destination = export_destination;
+  }
+
+  return message;
 }
 
 export function renderTemplate(template: string) {

@@ -1,4 +1,8 @@
-import { FolderDetails, FolderOff, TrashCan } from "@carbon/icons-react";
+import {
+  FolderDetails,
+  FolderOff,
+  TrashCan,
+} from "@carbon/icons-react";
 import Box from "@mui/material/Box";
 import Card from "@mui/material/Card";
 import CardActions from "@mui/material/CardActions";
@@ -16,6 +20,7 @@ import { Link } from "react-router-dom";
 import MutationIconButton from "components/buttons/MutationIconButton";
 import { getVideoElement } from "components/player/utils";
 import VideoPlayerPlaceholder from "components/player/videoplayer/VideoPlayerPlaceholder";
+import ExportRecordingButton from "components/recording/ExportRecordingButton";
 import { useAuthContext } from "context/AuthContext";
 import { useCamera } from "lib/api/camera";
 import { useDeleteRecording, useRecordings } from "lib/api/recordings";
@@ -183,6 +188,11 @@ export default function RecordingCardLatest({
             <Typography variant="body2">{text}</Typography>
           )}
           <Stack direction="row" spacing={1}>
+            <ExportRecordingButton
+              cameraIdentifier={camera_identifier}
+              disabled={!objHasValues(recording)}
+              recordingId={recording?.id}
+            />
             <Tooltip title="View Recordings">
               <span>
                 <IconButton

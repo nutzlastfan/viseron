@@ -8,6 +8,8 @@ import eslint from "vite-plugin-eslint";
 import svgr from "vite-plugin-svgr";
 import viteTsconfigPaths from "vite-tsconfig-paths";
 
+const configDir = process.cwd();
+
 const proxyOptions = {
   changeOrigin: true,
   timeout: 5000,
@@ -20,13 +22,13 @@ export default defineConfig(({ mode }) => {
   return {
     appType: "mpa",
     base: "./", // Use relative paths for assets to support any subpath
+    root: configDir,
     plugins: [
       react({
         babel: {
           plugins: ["babel-plugin-react-compiler"],
         },
       }),
-      ,
       viteTsconfigPaths(),
       svgr(),
       eslint(),
@@ -34,8 +36,8 @@ export default defineConfig(({ mode }) => {
     build: {
       rollupOptions: {
         input: {
-          main: resolve(__dirname, "index.html"),
-          404: resolve(__dirname, "404.html"),
+          main: resolve(configDir, "index.html"),
+          404: resolve(configDir, "404.html"),
         },
       },
     },

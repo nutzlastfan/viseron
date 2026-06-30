@@ -157,6 +157,7 @@ class TriggerTypes(Enum):
     MOTION = "motion"
     OBJECT = "object"
     MANUAL = "manual"
+    SCHEDULE = "schedule"
 
 
 class Recordings(Base):

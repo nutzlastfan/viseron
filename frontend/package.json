@@ -113,8 +113,8 @@
     "vitest": "^3.2.4"
   },
   "scripts": {
-    "start": "vite --host",
-    "build": "tsc && vite build",
+    "start": "vite --host --configLoader native",
+    "build": "tsc && vite build --configLoader native",
     "serve": "vite preview",
     "e2e:update-screenshots": "playwright test e2e/tests/docs.spec.ts -c e2e/playwright.config.ts",
     "lint:eslint": "eslint \"src/**/**.{js,jsx,ts,tsx,json}\"",

@@ -15,7 +15,12 @@ from tornado.ioloop import IOLoop
 from viseron.components.nvr.const import DOMAIN as NVR_DOMAIN
 from viseron.components.storage.const import COMPONENT as STORAGE_COMPONENT
 from viseron.components.webserver.auth import Role
-from viseron.components.webserver.const import COMPONENT
+from viseron.components.webserver.const import (
+    CAMERA_ADMIN_PERMISSIONS,
+    CAMERA_READ_PERMISSIONS,
+    CAMERA_WRITE_PERMISSIONS,
+    COMPONENT,
+)
 from viseron.domains.camera.const import DOMAIN as CAMERA_DOMAIN
 from viseron.exceptions import DomainNotRegisteredError
 from viseron.helpers import get_utc_offset, utcnow
@@ -263,6 +268,48 @@ class ViseronRequestHandler(tornado.web.RequestHandler):
 
         return True
 
+    def validate_cookie_session(self) -> bool:
+        """Validate the browser cookie session.
+
+        Browser API requests normally authenticate with the JWT header/payload from
+        localStorage plus the signature cookie. If localStorage is stale or missing
+        while the httpOnly session cookies are still valid, fall back to the cookie
+        session instead of leaving the UI in an unauthenticated limbo.
+        """
+        if not self._webserver.auth:
+            raise RuntimeError("Auth is not set up, cannot validate cookie session.")
+
+        refresh_token_cookie = self.get_secure_cookie("refresh_token")
+        static_asset_key = self.get_secure_cookie("static_asset_key")
+        if refresh_token_cookie is None or static_asset_key is None:
+            LOGGER.debug("Cookie session is missing refresh token or static asset key")
+            return False
+
+        refresh_token = self._webserver.auth.get_refresh_token_from_token(
+            refresh_token_cookie.decode()
+        )
+        if refresh_token is None:
+            LOGGER.debug("Refresh token cookie is not valid")
+            return False
+
+        if not hmac.compare_digest(
+            refresh_token.static_asset_key, static_asset_key.decode()
+        ):
+            LOGGER.debug("Static asset key does not belong to the refresh token")
+            return False
+
+        user = self._webserver.auth.get_user(refresh_token.user_id)
+        if user is None or not user.enabled:
+            LOGGER.debug("Cookie session user not found or disabled")
+            return False
+
+        if self.current_user is not None and self.current_user != user:
+            LOGGER.debug("Cookie session user mismatch")
+            return False
+
+        self.current_user = user
+        return True
+
     def _get_cameras(self) -> None | dict[str, AbstractCamera]:
         """Get all registered camera instances."""
         try:
@@ -363,6 +410,58 @@ class ViseronRequestHandler(tornado.web.RequestHandler):
 
         return None
 
+    def filter_camera_identifiers(self, camera_identifiers: list[str]) -> list[str]:
+        """Filter camera identifiers by the current user's assigned cameras."""
+        if (
+            not self.current_user
+            or self.current_user.assigned_cameras is None
+            or self.current_user.role == Role.ADMIN
+        ):
+            return camera_identifiers
+
+        allowed_cameras = set(self.current_user.assigned_cameras)
+        return [
+            camera_identifier
+            for camera_identifier in camera_identifiers
+            if camera_identifier in allowed_cameras
+        ]
+
+    @staticmethod
+    def _default_permissions_for_role(role: Role) -> list[str]:
+        """Return default camera permissions for users without explicit permissions."""
+        if role == Role.ADMIN:
+            return list(CAMERA_ADMIN_PERMISSIONS)
+        if role == Role.WRITE:
+            return list(CAMERA_WRITE_PERMISSIONS)
+        return list(CAMERA_READ_PERMISSIONS)
+
+    def camera_permissions(self, camera_identifier: str) -> list[str]:
+        """Return current user's effective permissions for a camera."""
+        if not self.current_user:
+            return list(CAMERA_ADMIN_PERMISSIONS)
+
+        if self.current_user.role == Role.ADMIN:
+            return list(CAMERA_ADMIN_PERMISSIONS)
+
+        if (
+            self.current_user.assigned_cameras is not None
+            and camera_identifier not in self.current_user.assigned_cameras
+        ):
+            return []
+
+        if self.current_user.camera_permissions is not None:
+            return list(
+                self.current_user.camera_permissions.get(camera_identifier, [])
+            )
+
+        return self._default_permissions_for_role(self.current_user.role)
+
+    def has_camera_permission(
+        self, camera_identifier: str, permission: str
+    ) -> bool:
+        """Return if current user may perform an action on a camera."""
+        return permission in self.camera_permissions(camera_identifier)
+
     @overload
     def get_camera(self, camera_identifier: str) -> AbstractCamera | None: ...
 
@@ -438,6 +537,11 @@ class ViseronRequestHandler(tornado.web.RequestHandler):
             if refresh_token and hmac.compare_digest(
                 refresh_token.static_asset_key, static_asset_key.decode()
             ):
+                user = self._webserver.auth.get_user(refresh_token.user_id)
+                if user is None or not user.enabled:
+                    LOGGER.debug("Camera token cookie user not found or disabled")
+                    return False
+                self.current_user = user
                 return True
         return False
 

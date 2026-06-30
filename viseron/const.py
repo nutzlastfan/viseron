@@ -99,7 +99,7 @@ CAMERA_INPUT_ARGS = [
     "-vsync",
     "0",
 ]
-CAMERA_SEGMENT_DURATION = 5
+CAMERA_SEGMENT_DURATION = 60
 
 
 # Environment variables
